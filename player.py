@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from bisect import bisect_left
 import ctypes
+import heapq
 import threading
 import time
 from typing import Callable
@@ -15,6 +16,71 @@ class TimedEvent:
     time: float
     pressed: bool
     note: int
+
+
+KeyboardState = tuple[int, int]  # (three-octave base bank, octave modifier)
+INITIAL_KEYBOARD_STATE: KeyboardState = (0, 0)
+KEYBOARD_STATES: tuple[KeyboardState, ...] = (
+    (-3, 0), (-3, 1),
+    (0, -1), (0, 0), (0, 1),
+    (3, -1), (3, 0),
+)
+CONTROL_COST = {"LSHIFT": 100, "LCTRL": 100, ".": 110, ",": 110}
+
+
+def next_keyboard_state(state: KeyboardState, control: str) -> KeyboardState:
+    """Apply one Star Resonance keyboard-range toggle.
+
+    The three-octave base bank and Shift/Ctrl modifier are separate state.
+    Shift and Ctrl replace one another, so switching directly between them
+    changes the displayed range by two octaves.
+    """
+    base, modifier = state
+    if control == "LSHIFT":
+        if base == 3:  # Shift is disabled in the highest base bank.
+            return state
+        return base, (0 if modifier == 1 else 1)
+    if control == "LCTRL":
+        if base == -3:  # Ctrl is disabled in the lowest base bank.
+            return state
+        return base, (0 if modifier == -1 else -1)
+    if control == ".":  # Physical JIS > key.
+        if base < 3 and base + modifier <= 0:
+            return base + 3, modifier
+        return state
+    if control == ",":  # Physical JIS < key.
+        if base > -3 and base + modifier >= 0:
+            return base - 3, modifier
+        return state
+    raise ValueError(f"Unknown keyboard-range control: {control}")
+
+
+def build_keyboard_paths() -> dict[tuple[KeyboardState, KeyboardState], tuple[str, ...]]:
+    """Return the cheapest valid control sequence between all reachable states."""
+    paths: dict[tuple[KeyboardState, KeyboardState], tuple[str, ...]] = {}
+    controls = ("LSHIFT", "LCTRL", ".", ",")
+    for start in KEYBOARD_STATES:
+        queue: list[tuple[int, int, KeyboardState, tuple[str, ...]]] = [(0, 0, start, ())]
+        best: dict[KeyboardState, int] = {start: 0}
+        serial = 0
+        while queue:
+            cost, _, state, sequence = heapq.heappop(queue)
+            if cost != best.get(state):
+                continue
+            paths[(start, state)] = sequence
+            for control in controls:
+                target = next_keyboard_state(state, control)
+                if target == state or target not in KEYBOARD_STATES:
+                    continue
+                target_cost = cost + CONTROL_COST[control]
+                if target_cost < best.get(target, 10**12):
+                    best[target] = target_cost
+                    serial += 1
+                    heapq.heappush(queue, (target_cost, serial, target, sequence + (control,)))
+    return paths
+
+
+KEYBOARD_PATHS = build_keyboard_paths()
 
 
 class MidiPlayer:
@@ -39,12 +105,19 @@ class MidiPlayer:
         self._speed = 1.0
         self._transpose = 0
         self._mapping: dict[int, str] = {}
+        self._normal_first_note = 48
+        self._supported_last_note = 95
+        self._state_mappings: dict[KeyboardState, dict[int, str]] = {}
         self._high_mapping: dict[int, str] = {}
+        self._octave_plan: dict[float, KeyboardState | str] = {}
+        self._octave_plan_stats = {"shift_taps": 0, "pulse_batches": 0, "control_taps": 0}
+        self._keyboard_state = INITIAL_KEYBOARD_STATE
         self._auto_octave = False
         self._octave_switch_delay = 0.018
         self._press_ms = 80
         self._ignore_drums = True
         self._active: dict[str, int] = {}
+        self._active_since: dict[str, float] = {}
         self._high_resolution_timer = False
         try:
             self._high_resolution_timer = ctypes.windll.winmm.timeBeginPeriod(1) == 0
@@ -63,9 +136,21 @@ class MidiPlayer:
         with self._lock:
             return self._position
 
+    @property
+    def octave_plan_stats(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._octave_plan_stats)
+
+    @property
+    def keyboard_shifted(self) -> bool:
+        with self._lock:
+            # Kept for the UI's existing "refocus before restoring" check.
+            return self._keyboard_state != INITIAL_KEYBOARD_STATE
+
     def load(self, song: MidiSong) -> None:
         with self._lock:
             self._release_all_locked()
+            self._restore_normal_keyboard_locked()
             self._song = song
             self._build_events_locked()
             self._position = 0.0
@@ -78,9 +163,21 @@ class MidiPlayer:
                   ignore_drums: bool = True, auto_octave: bool = False,
                   octave_switch_ms: int = 18) -> None:
         with self._lock:
+            if self._keyboard_state != INITIAL_KEYBOARD_STATE and not auto_octave:
+                self._restore_normal_keyboard_locked()
             rebuild = press_ms != self._press_ms or ignore_drums != self._ignore_drums
             self._mapping = dict(mapping)
             first_note = min(self._mapping, default=48)
+            self._normal_first_note = first_note
+            self._supported_last_note = first_note + 47
+            self._state_mappings = {
+                state: {
+                    note + (state[0] + state[1]) * 12: key
+                    for note, key in self._mapping.items()
+                    if first_note <= note + (state[0] + state[1]) * 12 <= self._supported_last_note
+                }
+                for state in KEYBOARD_STATES
+            }
             # After the game's > command, Z-M address the octave three steps
             # above the normal Z-M octave: C6-B6 when normal Z is C3.
             self._high_mapping = {
@@ -99,6 +196,8 @@ class MidiPlayer:
                 self._build_events_locked()
                 self._position = old_position
                 self._index = bisect_left(self._event_times, old_position)
+            elif self._song:
+                self._build_octave_plan_locked()
         self._wake.set()
 
     def _build_events_locked(self) -> None:
@@ -115,6 +214,109 @@ class MidiPlayer:
         events.sort(key=lambda item: (item.time, item.pressed, item.note))
         self._events = events
         self._event_times = [item.time for item in events]
+        self._build_octave_plan_locked()
+
+    def _build_octave_plan_locked(self) -> None:
+        """Precompute the cheapest normal/Shift/> route for every attack batch.
+
+        Every reachable base/modifier combination is considered. Dynamic
+        programming minimizes valid Shift/Ctrl/>/< transitions for the whole
+        song, including the final return to C3-B5. A C3 plus C6 attack cannot
+        fit in one three-octave view and retains the fast > pulse.
+        """
+        self._octave_plan = {}
+        self._octave_plan_stats = {"shift_taps": 0, "pulse_batches": 0, "control_taps": 0}
+        if not self._auto_octave or not self._events:
+            return
+
+        batches: list[tuple[float, tuple[int, ...], bool]] = []
+        index = 0
+        while index < len(self._events):
+            batch_time = self._events[index].time
+            batch: list[TimedEvent] = []
+            while index < len(self._events) and abs(self._events[index].time - batch_time) < 0.0005:
+                batch.append(self._events[index])
+                index += 1
+            # v0.0.3 supports the unlocked C3-B6 range only. Notes outside it
+            # remain intentionally silent and must not move the visible bank.
+            pitches = tuple(
+                event.note + self._transpose for event in batch
+                if event.pressed and
+                self._normal_first_note <= event.note + self._transpose <= self._supported_last_note
+            )
+            if not pitches:
+                continue
+            compatible = any(all(pitch in mapping for pitch in pitches)
+                             for mapping in self._state_mappings.values())
+            pulse = (not compatible and
+                     all(pitch in self._mapping or pitch in self._high_mapping for pitch in pitches) and
+                     any(pitch in self._high_mapping for pitch in pitches))
+            batches.append((batch_time, pitches, pulse))
+
+        def path_cost(start: KeyboardState, end: KeyboardState) -> int:
+            return sum(CONTROL_COST[key] for key in KEYBOARD_PATHS[(start, end)])
+
+        scores: dict[KeyboardState, int] = {
+            state: (0 if state == INITIAL_KEYBOARD_STATE else 10**12)
+            for state in KEYBOARD_STATES
+        }
+        history: list[dict[KeyboardState, tuple[KeyboardState, KeyboardState | str]]] = []
+
+        for _, pitches, pulse in batches:
+            next_scores = {state: 10**12 for state in KEYBOARD_STATES}
+            choices: dict[KeyboardState, tuple[KeyboardState, KeyboardState | str]] = {}
+
+            def offer(end_state: KeyboardState, previous: KeyboardState,
+                      extra_cost: int, action: KeyboardState | str) -> None:
+                candidate = scores[previous] + extra_cost
+                if candidate < next_scores[end_state]:
+                    next_scores[end_state] = candidate
+                    choices[end_state] = (previous, action)
+
+            for previous in KEYBOARD_STATES:
+                if scores[previous] >= 10**12:
+                    continue
+                for target, mapping in self._state_mappings.items():
+                    if all(pitch in mapping for pitch in pitches):
+                        offer(target, previous, path_cost(previous, target), target)
+                if pulse:
+                    # Return to C3-B5, play C3-B5, pulse > for C6-B6, then <.
+                    pulse_cost = path_cost(previous, INITIAL_KEYBOARD_STATE) + 240
+                    offer(INITIAL_KEYBOARD_STATE, previous, pulse_cost, "pulse")
+            scores = next_scores
+            history.append(choices)
+
+        end_state = min(KEYBOARD_STATES,
+                        key=lambda state: scores[state] + path_cost(state, INITIAL_KEYBOARD_STATE))
+        actions: list[KeyboardState | str] = [INITIAL_KEYBOARD_STATE] * len(batches)
+        state = end_state
+        for position in range(len(batches) - 1, -1, -1):
+            previous, mode = history[position][state]
+            actions[position] = mode
+            state = previous
+
+        simulated_state = INITIAL_KEYBOARD_STATE
+        shift_taps = 0
+        pulse_batches = 0
+        control_taps = 0
+        for (batch_time, _, _), action in zip(batches, actions):
+            target = INITIAL_KEYBOARD_STATE if action == "pulse" else action
+            sequence = KEYBOARD_PATHS[(simulated_state, target)]
+            shift_taps += sum(key == "LSHIFT" for key in sequence)
+            control_taps += len(sequence)
+            simulated_state = target
+            if action == "pulse":
+                pulse_batches += 1
+                control_taps += 2
+            self._octave_plan[batch_time] = action
+        final_sequence = KEYBOARD_PATHS[(simulated_state, INITIAL_KEYBOARD_STATE)]
+        shift_taps += sum(key == "LSHIFT" for key in final_sequence)
+        control_taps += len(final_sequence)
+        self._octave_plan_stats = {
+            "shift_taps": shift_taps,
+            "pulse_batches": pulse_batches,
+            "control_taps": control_taps,
+        }
 
     def play(self) -> bool:
         with self._lock:
@@ -127,11 +329,33 @@ class MidiPlayer:
         self._wake.set()
         return True
 
+    def prepare_for_playback(self) -> None:
+        """Set the next attack's planned view while the UI countdown runs."""
+        with self._lock:
+            if not self._auto_octave or not self._song:
+                return
+            index = self._index
+            while index < len(self._events):
+                attack_time = self._events[index].time
+                batch: list[TimedEvent] = []
+                while index < len(self._events) and abs(self._events[index].time - attack_time) < 0.0005:
+                    batch.append(self._events[index])
+                    index += 1
+                if not any(event.pressed for event in batch):
+                    continue
+                action = self._octave_plan.get(attack_time)
+                if action is None:
+                    return
+                target = INITIAL_KEYBOARD_STATE if action == "pulse" else action
+                self._set_keyboard_state_locked(target)
+                return
+
     def pause(self) -> None:
         with self._lock:
             if self._state == "playing":
                 self._state = "paused"
                 self._release_all_locked()
+                self._restore_normal_keyboard_locked()
         self._wake.set()
 
     def toggle(self) -> bool:
@@ -144,6 +368,7 @@ class MidiPlayer:
         with self._lock:
             self._state = "stopped"
             self._release_all_locked()
+            self._restore_normal_keyboard_locked()
             position = self._position
         self._wake.set()
         self._on_position(position, "stopped")
@@ -153,6 +378,7 @@ class MidiPlayer:
             duration = self._song.duration if self._song else 0.0
             self._position = max(0.0, min(float(position), duration))
             self._release_all_locked()
+            self._restore_normal_keyboard_locked()
             self._index = bisect_left(self._event_times, self._position)
         self._wake.set()
         self._on_position(self._position, self._state)
@@ -166,6 +392,7 @@ class MidiPlayer:
         with self._lock:
             self._shutdown = True
             self._release_all_locked()
+            self._restore_normal_keyboard_locked()
         self._wake.set()
         self._thread.join(timeout=1.0)
         if self._high_resolution_timer:
@@ -182,9 +409,10 @@ class MidiPlayer:
             except Exception:
                 pass
         self._active.clear()
+        self._active_since.clear()
 
-    def _dispatch_locked(self, event: TimedEvent) -> None:
-        key = self._mapping.get(event.note + self._transpose)
+    def _dispatch_locked(self, event: TimedEvent, mapping: dict[int, str] | None = None) -> None:
+        key = (mapping or self._mapping).get(event.note + self._transpose)
         if not key:
             return
         try:
@@ -192,21 +420,83 @@ class MidiPlayer:
             if event.pressed:
                 if count == 0:
                     self._send(key, True)
+                    self._active_since[key] = time.perf_counter()
                 self._active[key] = count + 1
             elif count > 0:
                 if count == 1:
+                    # A range change can consume part of the MIDI note's
+                    # scheduled duration. Guarantee a real, observable key
+                    # hold instead of releasing an overdue note immediately.
+                    elapsed = time.perf_counter() - self._active_since.get(key, 0.0)
+                    if elapsed < 0.008:
+                        time.sleep(0.008 - elapsed)
                     self._send(key, False)
                     self._active.pop(key, None)
+                    self._active_since.pop(key, None)
                 else:
                     self._active[key] = count - 1
         except Exception as exc:
             self._state = "paused"
             self._release_all_locked()
+            self._restore_normal_keyboard_locked()
             self._on_error(f"キー送信に失敗しました: {exc}")
 
-    def _tap_control_locked(self, key: str) -> None:
+    def _tap_control_locked(self, key: str, hold_seconds: float = 0.0) -> None:
         self._send(key, True)
+        if hold_seconds > 0:
+            time.sleep(hold_seconds)
         self._send(key, False)
+
+    def _set_keyboard_state_locked(self, target: KeyboardState) -> None:
+        if self._keyboard_state == target:
+            return
+        self._release_all_locked()
+        for control in KEYBOARD_PATHS[(self._keyboard_state, target)]:
+            # Modifier toggles are frame-polled by the game. A longer press is
+            # safe when issued during the rest before the target note.
+            hold = (max(0.020, min(0.050, self._octave_switch_delay + 0.010))
+                    if control in ("LSHIFT", "LCTRL") else 0.0)
+            self._tap_control_locked(control, hold)
+            self._keyboard_state = next_keyboard_state(self._keyboard_state, control)
+            if self._octave_switch_delay:
+                time.sleep(self._octave_switch_delay)
+
+    def _restore_normal_keyboard_locked(self) -> None:
+        if self._keyboard_state != INITIAL_KEYBOARD_STATE:
+            self._set_keyboard_state_locked(INITIAL_KEYBOARD_STATE)
+
+    def _prepare_next_keyboard_state_locked(self) -> None:
+        """Use the rest before the next attack to finish its range change."""
+        if not self._auto_octave or self._active:
+            return
+        index = self._index
+        while index < len(self._events):
+            attack_time = self._events[index].time
+            batch: list[TimedEvent] = []
+            while index < len(self._events) and abs(self._events[index].time - attack_time) < 0.0005:
+                batch.append(self._events[index])
+                index += 1
+            if not any(event.pressed for event in batch):
+                continue
+            action = self._octave_plan.get(attack_time)
+            if action is None:
+                return
+            target = INITIAL_KEYBOARD_STATE if action == "pulse" else action
+            if target == self._keyboard_state:
+                return
+            sequence = KEYBOARD_PATHS[(self._keyboard_state, target)]
+            modifier_hold = max(0.020, min(0.050, self._octave_switch_delay + 0.010))
+            transition_seconds = sum(
+                (modifier_hold if key in ("LSHIFT", "LCTRL") else 0.0)
+                + self._octave_switch_delay
+                for key in sequence
+            )
+            # Begin only shortly before it is needed; this also leaves earlier
+            # notes and their releases in the old keyboard view.
+            time_until_attack = (attack_time - self._position) / self._speed
+            if 0 < time_until_attack <= transition_seconds + 0.015:
+                self._set_keyboard_state_locked(target)
+            return
 
     def _dispatch_batch_locked(self, events: list[TimedEvent]) -> None:
         """Dispatch one timestamp, pulsing C6-B6 through the > keyboard bank.
@@ -219,6 +509,17 @@ class MidiPlayer:
             for event in events:
                 self._dispatch_locked(event)
             return
+
+        action = self._octave_plan.get(events[0].time, self._keyboard_state)
+        if action != "pulse":
+            target = action
+            self._set_keyboard_state_locked(target)
+            mapping = self._state_mappings.get(target, self._mapping)
+            for event in events:
+                self._dispatch_locked(event, mapping)
+            return
+
+        self._set_keyboard_state_locked(INITIAL_KEYBOARD_STATE)
 
         high_attacks = [
             event for event in events
@@ -238,9 +539,7 @@ class MidiPlayer:
         ))
         pressed: list[str] = []
         try:
-            self._tap_control_locked(".")  # Physical JIS > key: C3 -> C6 bank.
-            if self._octave_switch_delay:
-                time.sleep(self._octave_switch_delay)
+            self._set_keyboard_state_locked((3, 0))
             for key in high_keys:
                 self._send(key, True)
                 pressed.append(key)
@@ -248,9 +547,7 @@ class MidiPlayer:
             for key in reversed(pressed):
                 self._send(key, False)
             pressed.clear()
-            self._tap_control_locked(",")  # Physical JIS < key: return to C3.
-            if self._octave_switch_delay:
-                time.sleep(self._octave_switch_delay)
+            self._set_keyboard_state_locked(INITIAL_KEYBOARD_STATE)
         except Exception as exc:
             for key in reversed(pressed):
                 try:
@@ -263,6 +560,7 @@ class MidiPlayer:
             except Exception:
                 pass
             self._state = "paused"
+            self._restore_normal_keyboard_locked()
             self._on_error(f"4オクターブ自動切替に失敗しました: {exc}")
 
     def _run(self) -> None:
@@ -297,6 +595,7 @@ class MidiPlayer:
                 if self._state != "playing" or not self._song:
                     continue
                 self._position = min(self._song.duration, self._position + real_delta * self._speed)
+                self._prepare_next_keyboard_state_locked()
                 while self._index < len(self._events) and self._events[self._index].time <= self._position + 0.001:
                     event_time = self._events[self._index].time
                     batch: list[TimedEvent] = []
@@ -307,6 +606,7 @@ class MidiPlayer:
                     self._dispatch_batch_locked(batch)
                 if self._position >= self._song.duration:
                     self._release_all_locked()
+                    self._restore_normal_keyboard_locked()
                     self._state = "stopped"
                     self._position = 0.0
                     self._index = 0

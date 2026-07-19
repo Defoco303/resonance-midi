@@ -35,7 +35,7 @@ class ConfigStoreTests(unittest.TestCase):
             54: "3", 55: "B", 56: "4", 57: "N", 58: "5", 59: "M",
             60: "A", 61: "6", 62: "S", 63: "7", 64: "D", 65: "F",
             66: "8", 67: "G", 68: "9", 69: "H", 70: "0", 71: "J",
-            72: "Q", 73: "-", 74: "W", 75: "^", 76: "E", 77: "R",
+            72: "Q", 73: "I", 74: "W", 75: "O", 76: "E", 77: "R",
             78: "P", 79: "T", 80: "@", 81: "Y", 82: "[", 83: "U",
         }
         self.assertEqual(mapping, expected)
@@ -51,7 +51,7 @@ class ConfigStoreTests(unittest.TestCase):
             finally:
                 config_store.CONFIG_PATH = old_path
         self.assertEqual(loaded["mapping"], config_store.DEFAULT_CONFIG["mapping"])
-        self.assertEqual(loaded["config_version"], 9)
+        self.assertEqual(loaded["config_version"], 10)
 
     def test_untouched_two_octave_mapping_is_expanded(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -68,7 +68,7 @@ class ConfigStoreTests(unittest.TestCase):
             finally:
                 config_store.CONFIG_PATH = old_path
         self.assertEqual(loaded["mapping"], config_store.DEFAULT_CONFIG["mapping"])
-        self.assertEqual(loaded["config_version"], 9)
+        self.assertEqual(loaded["config_version"], 10)
 
     def test_v6_default_opacity_is_migrated_to_eighty_percent(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -80,8 +80,25 @@ class ConfigStoreTests(unittest.TestCase):
                 loaded = config_store.load_config()
             finally:
                 config_store.CONFIG_PATH = old_path
-        self.assertEqual(loaded["config_version"], 9)
+        self.assertEqual(loaded["config_version"], 10)
         self.assertEqual(loaded["opacity"], 0.8)
+
+    def test_incorrect_v9_black_keys_are_migrated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old_path = config_store.CONFIG_PATH
+            try:
+                config_store.CONFIG_PATH = Path(folder) / "config.json"
+                wrong_mapping = {
+                    str(48 + i): key
+                    for i, key in enumerate(config_store.WRONG_V9_DEFAULT_KEYS)
+                }
+                config_store.CONFIG_PATH.write_text(
+                    json.dumps({"config_version": 9, "mapping": wrong_mapping}), encoding="utf-8")
+                loaded = config_store.load_config()
+            finally:
+                config_store.CONFIG_PATH = old_path
+        self.assertEqual(loaded["mapping"], config_store.DEFAULT_CONFIG["mapping"])
+        self.assertEqual(loaded["config_version"], 10)
 
     def test_game_octave_changes_effective_pitch(self):
         mapping = {48: "Z", 60: "A"}

@@ -424,7 +424,7 @@ class OptionsWindow(QWidget):
         drums.setChecked(self.owner.ignore_drums)
         drums.toggled.connect(lambda value: self.owner.update_setting("ignore_drums", value))
         layout.addWidget(drums)
-        auto = QCheckBox("4オクターブ自動切替（開始時 Z=C3）")
+        auto = QCheckBox("4オクターブ自動切替（譜面先読み・開始時 Z=C3）")
         auto.setChecked(self.owner.auto_octave)
         auto.toggled.connect(lambda value: self.owner.update_setting("auto_octave_switch", value))
         layout.addWidget(auto)
@@ -869,6 +869,9 @@ class ResonanceMidiWindow(QWidget):
         self._begin_playback()
 
     def _begin_playback(self) -> None:
+        # The game is already focused here. Prepare the seek destination's
+        # keyboard view before the countdown reaches zero.
+        self.player.prepare_for_playback()
         if self.countdown <= 0:
             self.player.play()
         else:
@@ -881,6 +884,8 @@ class ResonanceMidiWindow(QWidget):
         self.sustain_check_pending = False
         self.countdown_timer.stop()
         self._hide_countdown()
+        if self.player.keyboard_shifted:
+            self._focus_target()
         self.player.stop()
         self._set_running(False)
 
@@ -1002,10 +1007,14 @@ class ResonanceMidiWindow(QWidget):
 
     def _seek_released(self) -> None:
         self.seeking = False
+        if self.player.keyboard_shifted:
+            self._focus_target()
         self.player.seek(self.seek.value() / 1000.0)
 
     def _seek_jumped(self, value: int) -> None:
         self.current_time.setText(format_time(value / 1000.0))
+        if self.player.keyboard_shifted:
+            self._focus_target()
         self.player.seek(value / 1000.0)
 
     def _on_position(self, position: float, state: str) -> None:
@@ -1064,6 +1073,8 @@ class ResonanceMidiWindow(QWidget):
     def sync_player_config(self) -> None:
         try:
             auto = self.auto_octave and self.game_octave_offset == 0
+            if self.player.keyboard_shifted and not auto:
+                self._focus_target()
             mapping = mapping_for_game_octave(default_mapping(), 0 if auto else self.game_octave_offset)
             self.player.configure(mapping, self.transpose, self.speed, self.press_ms,
                                   self.ignore_drums, auto, self.octave_switch_ms)
@@ -1161,6 +1172,8 @@ class ResonanceMidiWindow(QWidget):
         self.config["window_y"] = self.y()
         if self.options_window is not None:
             self.options_window.close()
+        if self.player.keyboard_shifted:
+            self._focus_target()
         self.player.close()
         self.save()
         super().closeEvent(event)

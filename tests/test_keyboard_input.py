@@ -37,6 +37,12 @@ class WindowsInputLayoutTests(unittest.TestCase):
                     keyboard_input.send_key(labelled_key, True)
                     down.assert_called_once_with(direct_key, _pause=False)
 
+    @unittest.skipIf(keyboard_input.pydirectinput is None, "PyDirectInput is not installed")
+    def test_left_shift_is_side_specific(self):
+        with patch.object(keyboard_input.pydirectinput, "keyDown", return_value=True) as down:
+            keyboard_input.send_key("LSHIFT", True)
+            down.assert_called_once_with("shiftleft", _pause=False)
+
 
 if __name__ == "__main__":
     unittest.main()
