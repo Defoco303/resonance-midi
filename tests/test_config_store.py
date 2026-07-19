@@ -17,6 +17,8 @@ class ConfigStoreTests(unittest.TestCase):
             "press_ms": 1,
             "ignore_drums": True,
             "countdown": 3,
+            "check_sustain_state": True,
+            "ui_scale": 1.0,
             "topmost": True,
             "opacity": 0.5,
             "last_midi": "",
@@ -49,7 +51,7 @@ class ConfigStoreTests(unittest.TestCase):
             finally:
                 config_store.CONFIG_PATH = old_path
         self.assertEqual(loaded["mapping"], config_store.DEFAULT_CONFIG["mapping"])
-        self.assertEqual(loaded["config_version"], 7)
+        self.assertEqual(loaded["config_version"], 9)
 
     def test_untouched_two_octave_mapping_is_expanded(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -66,7 +68,7 @@ class ConfigStoreTests(unittest.TestCase):
             finally:
                 config_store.CONFIG_PATH = old_path
         self.assertEqual(loaded["mapping"], config_store.DEFAULT_CONFIG["mapping"])
-        self.assertEqual(loaded["config_version"], 7)
+        self.assertEqual(loaded["config_version"], 9)
 
     def test_v6_default_opacity_is_migrated_to_eighty_percent(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -78,7 +80,7 @@ class ConfigStoreTests(unittest.TestCase):
                 loaded = config_store.load_config()
             finally:
                 config_store.CONFIG_PATH = old_path
-        self.assertEqual(loaded["config_version"], 7)
+        self.assertEqual(loaded["config_version"], 9)
         self.assertEqual(loaded["opacity"], 0.8)
 
     def test_game_octave_changes_effective_pitch(self):

@@ -308,7 +308,9 @@ class MidiPlayer:
                 if self._position >= self._song.duration:
                     self._release_all_locked()
                     self._state = "stopped"
-                    report = (self._position, "ended")
+                    self._position = 0.0
+                    self._index = 0
+                    report = (0.0, "ended")
                 elif now - last_report >= 0.05:
                     report = (self._position, "playing")
                     last_report = now

@@ -3,19 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QByteArray, QEasingCurve, QObject, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEasingCurve, QObject, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
+    QLayout,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -28,9 +29,10 @@ from PySide6.QtWidgets import (
 )
 
 from config_store import default_mapping, load_config, mapping_for_game_octave, save_config
-from keyboard_input import WindowInfo, focus_window, list_windows, send_key
+from keyboard_input import WindowInfo, focus_window, list_windows, send_key, window_rect
 from midi_parser import MidiError, MidiSong, load_midi, note_name
 from player import MidiPlayer
+from sustain_detector import SustainState, capture_screen_rect, detect_sustain_state
 
 
 GAME_WINDOW_TITLE = "ブループロトコル：スターレゾナンス"
@@ -198,6 +200,125 @@ class PlayerBridge(QObject):
     error = Signal(str)
 
 
+class AlertDialog(QDialog):
+    """Dark, red-framed modal used for warnings and playback errors."""
+
+    def __init__(self, parent: QWidget, title: str, message: str):
+        super().__init__(
+            parent,
+            Qt.WindowType.Dialog
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setModal(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowTitle(title)
+        scale = max(0.5, min(2.0, float(getattr(parent, "ui_scale", 1.0))))
+        px = lambda value: max(1, round(value * scale))
+        self.setFixedWidth(px(500))
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        shell = QFrame()
+        shell.setObjectName("alertShell")
+        outer.addWidget(shell)
+
+        body = QVBoxLayout(shell)
+        body.setContentsMargins(px(16), 0, px(16), px(14))
+        body.setSpacing(px(12))
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        warning = QLabel("!")
+        warning.setObjectName("alertMark")
+        warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        warning.setFixedSize(px(30), px(30))
+        header.addWidget(warning)
+        title_label = QLabel(title)
+        title_label.setObjectName("alertTitle")
+        header.addWidget(title_label)
+        header.addStretch()
+        close = QToolButton()
+        close.setObjectName("alertClose")
+        close.setIcon(simple_icon("close", WHITE, px(14)))
+        close.setIconSize(QSize(px(14), px(14)))
+        close.setFixedSize(px(34), px(34))
+        close.clicked.connect(self.reject)
+        header.addWidget(close)
+        body.addLayout(header)
+
+        divider = QFrame()
+        divider.setObjectName("alertDivider")
+        divider.setFixedHeight(px(1))
+        body.addWidget(divider)
+
+        message_label = QLabel(message)
+        message_label.setObjectName("alertMessage")
+        message_label.setWordWrap(True)
+        message_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        message_label.setMinimumHeight(px(72))
+        body.addWidget(message_label)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        ok = QPushButton("OK")
+        ok.setObjectName("alertButton")
+        ok.setFixedSize(px(104), px(32))
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(ok)
+        body.addLayout(buttons)
+
+        self.setStyleSheet(f"""
+            QDialog {{ background: transparent; }}
+            QFrame#alertShell {{
+                background-color: rgba(8, 12, 17, 248);
+                border: {px(2)}px solid #e0525a;
+            }}
+            QLabel {{
+                color: {WHITE};
+                background: transparent;
+                border: none;
+                font-family: "Yu Gothic UI";
+                font-size: {px(13)}px;
+            }}
+            QLabel#alertMark {{
+                color: {WHITE};
+                background-color: #b8323b;
+                border: {px(1)}px solid #ff747c;
+                border-radius: {px(15)}px;
+                font-size: {px(20)}px;
+                font-weight: 800;
+            }}
+            QLabel#alertTitle {{
+                color: {WHITE};
+                font-size: {px(15)}px;
+                font-weight: 700;
+            }}
+            QLabel#alertMessage {{ color: {WHITE}; }}
+            QFrame#alertDivider {{ background-color: rgba(224, 82, 90, 150); border: none; }}
+            QToolButton#alertClose {{ background: transparent; border: none; }}
+            QToolButton#alertClose:hover {{ background-color: rgba(224, 82, 90, 80); }}
+            QPushButton#alertButton {{
+                color: {WHITE};
+                background-color: #a62f37;
+                border: {px(1)}px solid #f06a72;
+                font-family: "Yu Gothic UI";
+                font-size: {px(13)}px;
+                font-weight: 700;
+            }}
+            QPushButton#alertButton:hover {{ background-color: #c83d45; }}
+            QPushButton#alertButton:pressed {{ background-color: #84262d; }}
+        """)
+        self.adjustSize()
+        self.setFixedHeight(max(px(180), self.sizeHint().height()))
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self.parentWidget() is not None:
+            parent_rect = self.parentWidget().frameGeometry()
+            self.move(parent_rect.center() - self.rect().center())
+
+
 class OptionsWindow(QWidget):
     closed = Signal()
 
@@ -208,6 +329,7 @@ class OptionsWindow(QWidget):
         self.setWindowTitle("Resonance MIDI Player - Options")
         self.setFixedSize(650, 326)
         self._build()
+        self.owner.scale_widget_tree(self)
         self.owner.apply_background_style(self)
 
     def _build(self) -> None:
@@ -330,6 +452,12 @@ class OptionsWindow(QWidget):
         top.setChecked(self.owner.topmost)
         top.toggled.connect(self.owner.set_topmost)
         layout.addWidget(top)
+        self.sustain_check = QCheckBox("サステイン状態のチェック")
+        self.sustain_check.setChecked(self.owner.sustain_check)
+        self.sustain_check.toggled.connect(
+            lambda value: self.owner.update_setting("check_sustain_state", value)
+        )
+        layout.addWidget(self.sustain_check)
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(QLabel("背景の透明度"))
         opacity_row.addStretch()
@@ -343,9 +471,28 @@ class OptionsWindow(QWidget):
         opacity.valueChanged.connect(self._opacity_changed)
         opacity.sliderReleased.connect(self.owner.save)
         layout.addWidget(opacity)
-        note = QLabel("文字・アイコン・ボタンは不透明のままです")
-        note.setWordWrap(True)
-        layout.addWidget(note)
+
+        scale_row = QHBoxLayout()
+        scale_row.addWidget(QLabel("UIの大きさ"))
+        scale_row.addStretch()
+        self.scale_value = QLabel(f"{self.owner.ui_scale:.1f}x")
+        self.scale_value.setObjectName("strongLabel")
+        scale_row.addWidget(self.scale_value)
+        layout.addLayout(scale_row)
+        self.scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scale_slider.setRange(5, 20)
+        self.scale_slider.setSingleStep(1)
+        self.scale_slider.setPageStep(1)
+        self.scale_slider.setTickInterval(1)
+        self.scale_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.scale_slider.setValue(round(self.owner.ui_scale * 10))
+        self.scale_slider.valueChanged.connect(
+            lambda value: self.scale_value.setText(f"{value / 10:.1f}x")
+        )
+        self.scale_slider.sliderReleased.connect(
+            lambda: self.owner.set_ui_scale(self.scale_slider.value() / 10)
+        )
+        layout.addWidget(self.scale_slider)
         layout.addStretch()
 
     def _opacity_changed(self, value: int) -> None:
@@ -380,6 +527,7 @@ class ResonanceMidiWindow(QWidget):
         self.position_save_timer.timeout.connect(self.save)
         self.seeking = False
         self.countdown_remaining = 0
+        self.sustain_check_pending = False
         self.speed = float(self.config.get("speed", 1.0))
         self.transpose = int(self.config.get("transpose", 0))
         self.press_ms = int(self.config.get("press_ms", 80))
@@ -388,12 +536,15 @@ class ResonanceMidiWindow(QWidget):
         self.auto_octave = bool(self.config.get("auto_octave_switch", True))
         self.game_octave_offset = max(-3, min(3, int(self.config.get("game_octave_offset", 0))))
         self.countdown = max(0, min(10, int(self.config.get("countdown", 3))))
+        self.sustain_check = bool(self.config.get("check_sustain_state", True))
         self.topmost = bool(self.config.get("topmost", False))
         self.opacity = max(0.5, min(1.0, float(self.config.get("opacity", 0.8))))
+        self.ui_scale = max(0.5, min(2.0, round(float(self.config.get("ui_scale", 1.0)), 1)))
         self.setWindowTitle("Resonance MIDI Player")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(650, 190)
         self._build()
+        self.scale_widget_tree(self)
         self.apply_background_style(self)
 
         self.bridge = PlayerBridge()
@@ -416,6 +567,9 @@ class ResonanceMidiWindow(QWidget):
         panel = QFrame()
         panel.setObjectName("panel")
         return panel
+
+    def show_alert(self, title: str, message: str) -> None:
+        AlertDialog(self, title, message).exec()
 
     def icon_button(self, icon: QIcon, tooltip: str, size: int = 36) -> QToolButton:
         button = QToolButton()
@@ -544,22 +698,23 @@ class ResonanceMidiWindow(QWidget):
 
     def apply_background_style(self, widget: QWidget) -> None:
         alpha = round(self.opacity * 255)
+        px = lambda value: max(1, round(value * self.ui_scale))
         widget.setStyleSheet(f"""
-            QWidget {{ color: {WHITE}; font-family: "Yu Gothic UI"; font-size: 12px; }}
-            QFrame#shell {{ background-color: rgba(0, 0, 0, {alpha}); border: 1px solid rgba(189, 247, 255, 75); }}
+            QWidget {{ color: {WHITE}; font-family: "Yu Gothic UI"; font-size: {px(12)}px; }}
+            QFrame#shell {{ background-color: rgba(0, 0, 0, {alpha}); border: {px(1)}px solid rgba(189, 247, 255, 75); }}
             QFrame#accentBar {{ background-color: {ACCENT}; border: none; }}
             QFrame#header {{ background: transparent; border: none; }}
-            QFrame#panel {{ background: transparent; border: 1px solid rgba(189, 247, 255, 65); }}
+            QFrame#panel {{ background: transparent; border: {px(1)}px solid rgba(189, 247, 255, 65); }}
             QLabel {{ color: {WHITE}; background: transparent; border: none; }}
             QLabel#windowTitle {{ font-weight: 700; color: {WHITE}; }}
-            QLabel#songTitle {{ font-size: 13px; font-weight: 700; color: {WHITE}; }}
+            QLabel#songTitle {{ font-size: {px(13)}px; font-weight: 700; color: {WHITE}; }}
             QLabel#metaLabel {{ color: {WHITE}; }}
             QLabel#strongLabel {{ font-weight: 700; color: {WHITE}; }}
-            QLabel#sectionTitle {{ font-size: 15px; font-weight: 700; color: {WHITE}; }}
-            QLabel#countdownLabel {{ font-size: 24px; font-weight: 800; color: {WHITE}; background: transparent; }}
+            QLabel#sectionTitle {{ font-size: {px(15)}px; font-weight: 700; color: {WHITE}; }}
+            QLabel#countdownLabel {{ font-size: {px(24)}px; font-weight: 800; color: {WHITE}; background: transparent; }}
             QToolButton#iconButton {{ background: transparent; border: none; }}
             QToolButton#iconButton:hover {{ background-color: rgba(70, 90, 110, 190); }}
-            QToolButton#stepButton {{ background-color: #242a31; border: 1px solid #343b44; }}
+            QToolButton#stepButton {{ background-color: #242a31; border: {px(1)}px solid #343b44; }}
             QToolButton#stepButton:hover {{ background-color: #39434e; }}
             QToolButton#playButton {{ background-color: {PLAY_BLUE}; border: none; }}
             QToolButton#playButton:hover {{ background-color: #3194e7; }}
@@ -567,15 +722,101 @@ class ResonanceMidiWindow(QWidget):
             QToolButton#playButton[running="true"]:hover {{ background-color: #e0525a; }}
             QPushButton#midiButton {{ background-color: #bdf7ff; color: #101010; border: none; font-weight: 700; }}
             QPushButton#midiButton:hover {{ background-color: #d9fbff; }}
-            QComboBox, QSpinBox {{ background-color: #171b20; color: {WHITE}; border: 1px solid #343b44; padding: 4px 7px; selection-background-color: #29465f; selection-color: {WHITE}; }}
-            QComboBox QAbstractItemView {{ background-color: #171b20; color: {WHITE}; border: 1px solid #343b44; selection-background-color: #29465f; selection-color: {WHITE}; }}
-            QComboBox::drop-down {{ border: none; width: 22px; }}
-            QSpinBox::up-button, QSpinBox::down-button {{ background-color: #242a31; border: none; width: 18px; }}
-            QCheckBox {{ color: {WHITE}; spacing: 6px; }}
-            QSlider::groove:horizontal {{ height: 6px; background-color: #171b20; border-radius: 3px; }}
-            QSlider::sub-page:horizontal {{ background-color: #171b20; border-radius: 3px; }}
-            QSlider::handle:horizontal {{ width: 12px; margin: -4px 0; background-color: {WHITE}; border-radius: 6px; }}
+            QComboBox, QSpinBox {{ background-color: #171b20; color: {WHITE}; border: {px(1)}px solid #343b44; padding: {px(4)}px {px(7)}px; selection-background-color: #29465f; selection-color: {WHITE}; }}
+            QComboBox QAbstractItemView {{ background-color: #171b20; color: {WHITE}; border: {px(1)}px solid #343b44; selection-background-color: #29465f; selection-color: {WHITE}; }}
+            QComboBox::drop-down {{ border: none; width: {px(22)}px; }}
+            QSpinBox::up-button, QSpinBox::down-button {{ background-color: #242a31; border: none; width: {px(18)}px; }}
+            QCheckBox {{ color: {WHITE}; spacing: {px(6)}px; }}
+            QSlider::groove:horizontal {{ height: {px(6)}px; background-color: #171b20; border-radius: {px(3)}px; }}
+            QSlider::sub-page:horizontal {{ background-color: #171b20; border-radius: {px(3)}px; }}
+            QSlider::handle:horizontal {{ width: {px(12)}px; margin: -{px(4)}px 0; background-color: {WHITE}; border-radius: {px(6)}px; }}
         """)
+
+    def scale_widget_tree(self, root: QWidget) -> None:
+        """Scale fixed geometry, layout spacing and icons from stored 1.0x metrics."""
+        scale = self.ui_scale
+        widgets = [root, *root.findChildren(QWidget)]
+        for child in widgets:
+            if not hasattr(child, "_ui_base_minimum"):
+                child._ui_base_minimum = QSize(child.minimumSize())
+                child._ui_base_maximum = QSize(child.maximumSize())
+                if isinstance(child, QToolButton):
+                    child._ui_base_icon_size = QSize(child.iconSize())
+            base_min = child._ui_base_minimum
+            base_max = child._ui_base_maximum
+            minimum = QSize(round(base_min.width() * scale), round(base_min.height() * scale))
+            maximum = QSize(
+                base_max.width() if base_max.width() >= 16777215 else round(base_max.width() * scale),
+                base_max.height() if base_max.height() >= 16777215 else round(base_max.height() * scale),
+            )
+            child.setMinimumSize(QSize(0, 0))
+            child.setMaximumSize(maximum)
+            child.setMinimumSize(minimum)
+            if isinstance(child, QToolButton):
+                icon_size = child._ui_base_icon_size
+                child.setIconSize(QSize(
+                    max(1, round(icon_size.width() * scale)),
+                    max(1, round(icon_size.height() * scale)),
+                ))
+
+        layouts: list[QLayout] = []
+        if root.layout() is not None:
+            layouts.append(root.layout())
+        layouts.extend(root.findChildren(QLayout))
+        seen: set[int] = set()
+        for layout in layouts:
+            if id(layout) in seen:
+                continue
+            seen.add(id(layout))
+            if not hasattr(layout, "_ui_base_margins"):
+                margins = layout.contentsMargins()
+                layout._ui_base_margins = (
+                    margins.left(), margins.top(), margins.right(), margins.bottom()
+                )
+                layout._ui_base_spacing = layout.spacing()
+            left, top, right, bottom = layout._ui_base_margins
+            layout.setContentsMargins(
+                round(left * scale), round(top * scale),
+                round(right * scale), round(bottom * scale),
+            )
+            if layout._ui_base_spacing >= 0:
+                layout.setSpacing(round(layout._ui_base_spacing * scale))
+        self.apply_background_style(root)
+        base_min = root._ui_base_minimum
+        base_max = root._ui_base_maximum
+        if base_min == base_max:
+            if root.layout() is not None:
+                root.layout().setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+            root.setFixedSize(
+                max(1, round(base_min.width() * scale)),
+                max(1, round(base_min.height() * scale)),
+            )
+        root.updateGeometry()
+
+    def set_ui_scale(self, value: float) -> None:
+        value = max(0.5, min(2.0, round(float(value), 1)))
+        self.ui_scale = value
+        self.config["ui_scale"] = value
+        self.scale_widget_tree(self)
+        if self.options_window is not None:
+            self.scale_widget_tree(self.options_window)
+            self.options_window.scale_value.setText(f"{value:.1f}x")
+            self.options_window.scale_slider.blockSignals(True)
+            self.options_window.scale_slider.setValue(round(value * 10))
+            self.options_window.scale_slider.blockSignals(False)
+        self._keep_on_screen()
+        self.anchor_options()
+        self.save()
+
+    def _keep_on_screen(self) -> None:
+        screen = QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        x = min(max(self.x(), area.left()), max(area.left(), area.right() - self.width() + 1))
+        y = min(max(self.y(), area.top()), max(area.top(), area.bottom() - self.height() + 1))
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
 
     def choose_file(self) -> None:
         last = Path(self.config.get("last_midi", ""))
@@ -589,7 +830,7 @@ class ResonanceMidiWindow(QWidget):
             song = load_midi(path)
         except (MidiError, OSError) as exc:
             if not quiet:
-                QMessageBox.critical(self, "MIDI読込エラー", str(exc))
+                self.show_alert("MIDI読込エラー", str(exc))
             return
         self.song = song
         self.player.load(song)
@@ -611,11 +852,23 @@ class ResonanceMidiWindow(QWidget):
         if not self.song:
             self.choose_file()
             return
-        if self.player.state == "playing" or self.countdown_timer.isActive():
+        if (self.player.state == "playing" or self.countdown_timer.isActive()
+                or self.sustain_check_pending):
             self.stop()
             return
         self.sync_player_config()
-        self._focus_target()
+        target = self._focus_target()
+        if self.sustain_check:
+            if target is None:
+                self._show_sustain_absent()
+                return
+            self.sustain_check_pending = True
+            self._set_running(True)
+            QTimer.singleShot(250, lambda hwnd=target.hwnd: self._finish_sustain_check(hwnd))
+            return
+        self._begin_playback()
+
+    def _begin_playback(self) -> None:
         if self.countdown <= 0:
             self.player.play()
         else:
@@ -625,10 +878,82 @@ class ResonanceMidiWindow(QWidget):
         self._set_running(True)
 
     def stop(self) -> None:
+        self.sustain_check_pending = False
         self.countdown_timer.stop()
         self._hide_countdown()
         self.player.stop()
         self._set_running(False)
+
+    def _capture_window(self, hwnd: int):
+        """Capture the focused game in physical pixels, independent of DPI."""
+        rect = window_rect(hwnd)
+        if rect is None:
+            return []
+        image = capture_screen_rect(rect)
+        return [] if image.isNull() else [image]
+
+    def _finish_sustain_check(self, hwnd: int) -> None:
+        if not self.sustain_check_pending:
+            return
+        self.sustain_check_pending = False
+        images = self._capture_window(hwnd)
+        if not images:
+            self._disable_sustain_check()
+            self.show_alert(
+                "サステイン状態の確認",
+                "サステイン状態が取得できませんでした。\n"
+                "以降サステイン状態のチェックは行いません。",
+            )
+            self._set_running(False)
+            return
+        detections = [detect_sustain_state(image) for image in images]
+        detection = next(
+            (item for item in detections if item.state in (SustainState.ON, SustainState.OFF)),
+            next(
+                (item for item in detections if item.state is SustainState.ABSENT),
+                detections[0],
+            ),
+        )
+        if detection.state is SustainState.ON:
+            self._begin_playback()
+            return
+        self._set_running(False)
+        if detection.state is SustainState.OFF:
+            self.show_alert(
+                "サステインをオンにしてください",
+                "サステイン [Space] をオンにしてください。\n\n"
+                "オンにしてもこのメッセージが出る場合は、オプションで"
+                "「サステイン状態のチェック」をオフにしてください。",
+            )
+        elif detection.state is SustainState.ABSENT:
+            self._show_sustain_absent()
+        else:
+            self._disable_sustain_check()
+            self.show_alert(
+                "サステイン状態の確認",
+                "サステイン状態が取得できませんでした。\n"
+                "以降サステイン状態のチェックは行いません。",
+            )
+
+    def _show_sustain_absent(self) -> None:
+        self._set_running(False)
+        self.show_alert(
+            "演奏モードを確認してください",
+            "「サステインペダル [Space]」が画面上に見つかりませんでした。\n"
+            "ゲーム側が演奏モードでない可能性があるので、演奏モードにしてください。\n\n"
+            "演奏モードにしても、このメッセージが出る場合は、オプションで"
+            "「サステイン状態のチェック」をオフにしてください。",
+        )
+
+    def _disable_sustain_check(self) -> None:
+        self.sustain_check = False
+        self.config["check_sustain_state"] = False
+        self.save()
+        if self.options_window is not None:
+            checkbox = self.options_window.sustain_check
+            checkbox.blockSignals(True)
+            checkbox.setChecked(False)
+            checkbox.blockSignals(False)
 
     def _countdown_tick(self) -> None:
         self.countdown_remaining -= 1
@@ -692,7 +1017,7 @@ class ResonanceMidiWindow(QWidget):
 
     def _on_error(self, message: str) -> None:
         self._set_running(False)
-        QMessageBox.critical(self, "再生エラー", message)
+        self.show_alert("再生エラー", message)
 
     def refresh_windows(self) -> None:
         self.windows = [item for item in list_windows() if item.title != self.windowTitle()]
@@ -715,21 +1040,22 @@ class ResonanceMidiWindow(QWidget):
             self.config["target_title"] = title
             self.save()
 
-    def _focus_target(self) -> bool:
+    def _focus_target(self) -> WindowInfo | None:
         wanted = self.target_combo.currentText() or GAME_WINDOW_TITLE
         window = next((item for item in self.windows if item.title == wanted), None)
         if window and focus_window(window.hwnd):
-            return True
+            return window
         self.refresh_windows()
         wanted = self.target_combo.currentText() or wanted
         window = next((item for item in self.windows if item.title == wanted), None)
         if window and focus_window(window.hwnd):
-            return True
-        return False
+            return window
+        return None
 
     def update_setting(self, key: str, value) -> None:
         setattr(self, {
             "auto_octave_switch": "auto_octave",
+            "check_sustain_state": "sustain_check",
         }.get(key, key), value)
         self.config[key] = value
         self.save()
@@ -753,7 +1079,25 @@ class ResonanceMidiWindow(QWidget):
 
     def anchor_options(self) -> None:
         if self.options_window is not None:
-            self.options_window.move(self.x(), self.y() + self.height() + 1)
+            screen = QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
+            if screen is None:
+                self.options_window.move(self.x(), self.y() + self.height() + 1)
+                return
+            area = screen.availableGeometry()
+            gap = max(1, round(self.ui_scale))
+            x = min(
+                max(self.x(), area.left()),
+                max(area.left(), area.right() - self.options_window.width() + 1),
+            )
+            below = self.y() + self.height() + gap
+            above = self.y() - self.options_window.height() - gap
+            if below + self.options_window.height() - 1 <= area.bottom():
+                y = below
+            elif above >= area.top():
+                y = above
+            else:
+                y = area.top()
+            self.options_window.move(x, y)
 
     def moveEvent(self, event) -> None:
         super().moveEvent(event)
@@ -810,6 +1154,7 @@ class ResonanceMidiWindow(QWidget):
             pass
 
     def closeEvent(self, event) -> None:
+        self.sustain_check_pending = False
         self.countdown_timer.stop()
         self.position_save_timer.stop()
         self.config["window_x"] = self.x()

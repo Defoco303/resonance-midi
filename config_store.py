@@ -32,7 +32,7 @@ def default_mapping(base_note: int = 48) -> dict[int, str]:
 
 
 DEFAULT_CONFIG = {
-    "config_version": 7,
+    "config_version": 9,
     "mapping": {str(note): key for note, key in default_mapping().items()},
     "speed": 1.0,
     "transpose": 0,
@@ -42,6 +42,8 @@ DEFAULT_CONFIG = {
     "press_ms": 1,
     "ignore_drums": True,
     "countdown": 3,
+    "check_sustain_state": True,
+    "ui_scale": 1.0,
     "target_title": "ブループロトコル：スターレゾナンス",
     "last_midi": "",
     "topmost": True,
@@ -69,7 +71,7 @@ def load_config() -> dict:
                 loaded["target_title"] = DEFAULT_CONFIG["target_title"]
             if int(loaded.get("config_version", 1)) < 7 and loaded.get("opacity", 1.0) == 1.0:
                 loaded["opacity"] = 0.8
-            loaded["config_version"] = 7
+            loaded["config_version"] = 9
             result.update(loaded)
         if not isinstance(result.get("mapping"), dict):
             result["mapping"] = dict(DEFAULT_CONFIG["mapping"])

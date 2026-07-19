@@ -166,3 +166,17 @@ def focus_window(hwnd: int) -> bool:
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
     user32.BringWindowToTop(hwnd)
     return bool(user32.SetForegroundWindow(hwnd))
+
+
+def window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Return the visible window rectangle in virtual-screen coordinates."""
+    if not hwnd or not user32.IsWindow(hwnd):
+        return None
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    width = rect.right - rect.left
+    height = rect.bottom - rect.top
+    if width <= 0 or height <= 0:
+        return None
+    return rect.left, rect.top, width, height

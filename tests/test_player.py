@@ -21,6 +21,22 @@ class PlayerTests(unittest.TestCase):
         finally:
             player.close()
 
+    def test_natural_end_returns_position_to_start(self):
+        positions = []
+        song = MidiSong(Path("test.mid"), "test", 0.05,
+                        (MidiNote(0.01, 0.03, 60, 100, 0, 0),), ("track",), 120)
+        player = MidiPlayer(lambda *_: None, lambda pos, state: positions.append((pos, state)),
+                            lambda msg: self.fail(msg))
+        try:
+            player.configure({60: "A"}, 0, 1.0, 10)
+            player.load(song)
+            player.play()
+            time.sleep(0.10)
+            self.assertEqual(player.position, 0.0)
+            self.assertIn((0.0, "ended"), positions)
+        finally:
+            player.close()
+
     def test_seek_releases_key(self):
         sent = []
         song = MidiSong(Path("test.mid"), "test", 1.0,
