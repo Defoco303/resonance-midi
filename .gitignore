@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+release/
+songs/
+*.mid
+*.spec
+.pytest_cache/
+.venv/
+.idea/
+.vscode/
+
+# Legacy UI and local MIDI-arrangement helpers are not part of the app release.
+/app.py
+/scripts/
