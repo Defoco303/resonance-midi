@@ -7,6 +7,180 @@ from player import KEYBOARD_PATHS, KEYBOARD_STATES, MidiPlayer, next_keyboard_st
 
 
 class PlayerTests(unittest.TestCase):
+    def test_low_bank_starts_at_a0_on_n_key(self):
+        player = MidiPlayer(lambda *_: None, lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            mapping = {
+                48: "Z", 49: "1", 50: "X", 51: "2", 52: "C", 53: "V",
+                54: "3", 55: "B", 56: "4", 57: "N", 58: "5", 59: "M",
+            }
+            player.configure(mapping, 0, 1.0, 1, auto_octave=True, octave_switch_ms=0)
+            low = player._state_mappings[(-3, 0)]
+            self.assertNotIn(20, low)  # G#0 and below do not exist.
+            self.assertEqual(low[21], "N")  # A0
+            self.assertEqual(low[22], "5")  # A#0
+            self.assertEqual(low[23], "M")  # B0
+        finally:
+            player.close()
+
+    def test_high_bank_ends_at_c8_on_q_key(self):
+        player = MidiPlayer(lambda *_: None, lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            mapping = {
+                48: "Z", 60: "A", 72: "Q", 73: "I",
+            }
+            player.configure(mapping, 0, 1.0, 1, auto_octave=True, octave_switch_ms=0)
+            high = player._state_mappings[(3, 0)]
+            self.assertEqual(high[84], "Z")   # C6
+            self.assertEqual(high[96], "A")   # C7
+            self.assertEqual(high[108], "Q")  # C8
+            self.assertNotIn(109, high)         # C#8 and above do not exist.
+        finally:
+            player.close()
+
+    def test_c8_note_moves_high_and_plays_q(self):
+        sent = []
+        song = MidiSong(
+            Path("c8.mid"), "C8", 0.18,
+            (MidiNote(0.10, 0.12, 108, 100, 0, 0),),
+            ("track",), 120,
+        )
+        player = MidiPlayer(lambda key, down: sent.append((key, down)),
+                            lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure({48: "Z", 60: "A", 72: "Q"}, 0, 1.0, 1,
+                             auto_octave=True, octave_switch_ms=0)
+            player.load(song)
+            player.play()
+            time.sleep(0.24)
+            self.assertIn((".", True), sent)
+            self.assertIn(("Q", True), sent)
+            self.assertIn(("Q", False), sent)
+        finally:
+            player.close()
+
+    def test_notes_above_c8_are_ignored_without_moving_keyboard(self):
+        sent = []
+        song = MidiSong(
+            Path("above-c8.mid"), "above C8", 0.08,
+            (MidiNote(0.01, 0.03, 109, 100, 0, 0),),
+            ("track",), 120,
+        )
+        player = MidiPlayer(lambda key, down: sent.append((key, down)),
+                            lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure({48: "Z", 72: "Q", 73: "I"}, 0, 1.0, 1,
+                             auto_octave=True, octave_switch_ms=0)
+            player.load(song)
+            player.play()
+            time.sleep(0.12)
+            self.assertEqual(sent, [])
+        finally:
+            player.close()
+
+    def test_a0_note_moves_low_and_plays_n(self):
+        sent = []
+        song = MidiSong(
+            Path("a0.mid"), "A0", 0.18,
+            (MidiNote(0.10, 0.12, 21, 100, 0, 0),),
+            ("track",), 120,
+        )
+        player = MidiPlayer(lambda key, down: sent.append((key, down)),
+                            lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            mapping = {
+                48: "Z", 49: "1", 50: "X", 51: "2", 52: "C", 53: "V",
+                54: "3", 55: "B", 56: "4", 57: "N", 58: "5", 59: "M",
+            }
+            player.configure(mapping, 0, 1.0, 1, auto_octave=True, octave_switch_ms=0)
+            player.load(song)
+            player.play()
+            time.sleep(0.24)
+            self.assertIn((",", True), sent)
+            self.assertIn(("N", True), sent)
+            self.assertIn(("N", False), sent)
+        finally:
+            player.close()
+
+    def test_notes_below_a0_are_ignored_without_moving_keyboard(self):
+        sent = []
+        song = MidiSong(
+            Path("below-a0.mid"), "below A0", 0.08,
+            (MidiNote(0.01, 0.03, 20, 100, 0, 0),),
+            ("track",), 120,
+        )
+        player = MidiPlayer(lambda key, down: sent.append((key, down)),
+                            lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure({48: "Z", 57: "N"}, 0, 1.0, 1,
+                             auto_octave=True, octave_switch_ms=0)
+            player.load(song)
+            player.play()
+            time.sleep(0.12)
+            self.assertEqual(sent, [])
+        finally:
+            player.close()
+
+    def test_low_and_normal_chord_is_split_and_returns_to_initial_view(self):
+        sent = []
+        song = MidiSong(
+            Path("a0-c3.mid"), "A0 plus C3", 0.10,
+            (
+                MidiNote(0.01, 0.04, 21, 100, 0, 0),
+                MidiNote(0.01, 0.04, 48, 100, 0, 0),
+            ),
+            ("track",), 120,
+        )
+        mapping = {
+            48: "Z", 49: "1", 50: "X", 51: "2", 52: "C", 53: "V",
+            54: "3", 55: "B", 56: "4", 57: "N", 58: "5", 59: "M",
+        }
+        player = MidiPlayer(lambda key, down: sent.append((key, down)),
+                            lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(mapping, 0, 1.0, 1, auto_octave=True, octave_switch_ms=0)
+            player.load(song)
+            self.assertEqual(player.octave_plan_stats["pulse_batches"], 1)
+            player.play()
+            time.sleep(0.18)
+            self.assertIn(("Z", True), sent)
+            self.assertIn((",", True), sent)
+            self.assertIn(("N", True), sent)
+            self.assertIn((".", True), sent)
+            self.assertFalse(player.keyboard_shifted)
+        finally:
+            player.close()
+
+    def test_a0_and_c8_chord_visits_both_outer_banks_and_returns(self):
+        sent = []
+        song = MidiSong(
+            Path("a0-c8.mid"), "A0 plus C8", 0.12,
+            (
+                MidiNote(0.01, 0.04, 21, 100, 0, 0),
+                MidiNote(0.01, 0.04, 108, 100, 0, 0),
+            ),
+            ("track",), 120,
+        )
+        mapping = {
+            48: "Z", 57: "N", 60: "A", 72: "Q",
+        }
+        player = MidiPlayer(lambda key, down: sent.append((key, down)),
+                            lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(mapping, 0, 1.0, 1, auto_octave=True, octave_switch_ms=0)
+            player.load(song)
+            self.assertEqual(player.octave_plan_stats["pulse_batches"], 1)
+            self.assertEqual(player.octave_plan_stats["control_taps"], 4)
+            player.play()
+            time.sleep(0.20)
+            self.assertIn(("N", True), sent)
+            self.assertIn(("Q", True), sent)
+            self.assertEqual(sum(key == "." and down for key, down in sent), 2)
+            self.assertEqual(sum(key == "," and down for key, down in sent), 2)
+            self.assertFalse(player.keyboard_shifted)
+        finally:
+            player.close()
+
     def test_game_keyboard_state_rules(self):
         normal = (0, 0)
         shifted = next_keyboard_state(normal, "LSHIFT")
