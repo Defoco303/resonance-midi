@@ -72,6 +72,8 @@ VK_NAMES = {
     "PAGEUP": 0x21, "PAGEDOWN": 0x22, "END": 0x23, "HOME": 0x24,
     "LEFT": 0x25, "UP": 0x26, "RIGHT": 0x27, "DOWN": 0x28,
     "INSERT": 0x2D, "DELETE": 0x2E,
+    # Use the side-specific virtual keys for the game's toggle controls.
+    "LSHIFT": 0xA0, "RSHIFT": 0xA1, "LCTRL": 0xA2, "RCTRL": 0xA3,
 }
 VK_NAMES.update({f"F{i}": 0x6F + i for i in range(1, 13)})
 
@@ -98,6 +100,7 @@ def _native_send_key(name: str, pressed: bool) -> None:
 
 DIRECT_KEY_NAMES = {
     "ESC": "esc", "ENTER": "enter", "SHIFT": "shiftleft", "LSHIFT": "shiftleft",
+    "RSHIFT": "shiftright",
     "CTRL": "ctrlleft", "LCTRL": "ctrlleft", "ALT": "altleft", "SPACE": "space",
     "BACKSPACE": "backspace", "DELETE": "delete", "INSERT": "insert",
     "PAGEUP": "pageup", "PAGEDOWN": "pagedown", "HOME": "home", "END": "end",

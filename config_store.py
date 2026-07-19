@@ -13,7 +13,7 @@ CONFIG_PATH = APP_DIR / "config.json"
 DEFAULT_KEYS = (
     "Z", "1", "X", "2", "C", "V", "3", "B", "4", "N", "5", "M",
     "A", "6", "S", "7", "D", "F", "8", "G", "9", "H", "0", "J",
-    "Q", "-", "W", "^", "E", "R", "P", "T", "@", "Y", "[", "U",
+    "Q", "I", "W", "O", "E", "R", "P", "T", "@", "Y", "[", "U",
 )
 
 TWO_OCTAVE_DEFAULT_KEYS = DEFAULT_KEYS[:24]
@@ -26,13 +26,21 @@ OLD_DEFAULT_KEYS = (
     "I", "9", "O", "0", "P", "[", "]", "L", ";", ",", ".", "/",
 )
 
+# v0.0.2 used these two incorrect third-octave black-key labels. Retain the
+# exact layout so untouched user settings can be corrected automatically.
+WRONG_V9_DEFAULT_KEYS = (
+    "Z", "1", "X", "2", "C", "V", "3", "B", "4", "N", "5", "M",
+    "A", "6", "S", "7", "D", "F", "8", "G", "9", "H", "0", "J",
+    "Q", "-", "W", "^", "E", "R", "P", "T", "@", "Y", "[", "U",
+)
+
 
 def default_mapping(base_note: int = 48) -> dict[int, str]:
     return {base_note + index: key for index, key in enumerate(DEFAULT_KEYS)}
 
 
 DEFAULT_CONFIG = {
-    "config_version": 9,
+    "config_version": 10,
     "mapping": {str(note): key for note, key in default_mapping().items()},
     "speed": 1.0,
     "transpose": 0,
@@ -67,11 +75,16 @@ def load_config() -> dict:
             }
             if int(loaded.get("config_version", 1)) < 4 and loaded.get("mapping") == two_octave_mapping:
                 loaded["mapping"] = dict(DEFAULT_CONFIG["mapping"])
+            wrong_v9_mapping = {
+                str(48 + index): key for index, key in enumerate(WRONG_V9_DEFAULT_KEYS)
+            }
+            if int(loaded.get("config_version", 1)) < 10 and loaded.get("mapping") == wrong_v9_mapping:
+                loaded["mapping"] = dict(DEFAULT_CONFIG["mapping"])
             if loaded.get("target_title") in (None, "", "Star Resonance"):
                 loaded["target_title"] = DEFAULT_CONFIG["target_title"]
             if int(loaded.get("config_version", 1)) < 7 and loaded.get("opacity", 1.0) == 1.0:
                 loaded["opacity"] = 0.8
-            loaded["config_version"] = 9
+            loaded["config_version"] = 10
             result.update(loaded)
         if not isinstance(result.get("mapping"), dict):
             result["mapping"] = dict(DEFAULT_CONFIG["mapping"])
