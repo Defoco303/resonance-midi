@@ -106,8 +106,10 @@ class MidiPlayer:
         self._transpose = 0
         self._mapping: dict[int, str] = {}
         self._normal_first_note = 48
-        self._supported_last_note = 95
+        self._supported_first_note = 21
+        self._supported_last_note = 108
         self._state_mappings: dict[KeyboardState, dict[int, str]] = {}
+        self._low_mapping: dict[int, str] = {}
         self._high_mapping: dict[int, str] = {}
         self._octave_plan: dict[float, KeyboardState | str] = {}
         self._octave_plan_stats = {"shift_taps": 0, "pulse_batches": 0, "control_taps": 0}
@@ -169,21 +171,27 @@ class MidiPlayer:
             self._mapping = dict(mapping)
             first_note = min(self._mapping, default=48)
             self._normal_first_note = first_note
-            self._supported_last_note = first_note + 47
+            # The low-bank display starts at C0, but the game's keyboard
+            # itself starts at A0. With the normal C3 start, A0 is 27
+            # semitones below Z=C3 and lands on the physical N key.
+            self._supported_first_note = max(0, first_note - 27)
+            # The final unlock is expected to end at C8, 60 semitones above
+            # the normal C3 start. Notes above it must not move the keyboard.
+            self._supported_last_note = min(127, first_note + 60)
             self._state_mappings = {
                 state: {
                     note + (state[0] + state[1]) * 12: key
                     for note, key in self._mapping.items()
-                    if first_note <= note + (state[0] + state[1]) * 12 <= self._supported_last_note
+                    if (self._supported_first_note
+                        <= note + (state[0] + state[1]) * 12
+                        <= self._supported_last_note)
                 }
                 for state in KEYBOARD_STATES
             }
-            # After the game's > command, Z-M address the octave three steps
-            # above the normal Z-M octave: C6-B6 when normal Z is C3.
-            self._high_mapping = {
-                note + 36: key for note, key in self._mapping.items()
-                if first_note <= note < first_note + 12
-            }
+            self._low_mapping = dict(self._state_mappings.get((-3, 0), {}))
+            # After >, the complete physical keyboard addresses C6-B8. The
+            # supported-range filter trims it at the game's final C8 key.
+            self._high_mapping = dict(self._state_mappings.get((3, 0), {}))
             self._auto_octave = bool(auto_octave)
             self._octave_switch_delay = max(0, min(int(octave_switch_ms), 100)) / 1000
             self._transpose = int(transpose)
@@ -229,7 +237,7 @@ class MidiPlayer:
         if not self._auto_octave or not self._events:
             return
 
-        batches: list[tuple[float, tuple[int, ...], bool]] = []
+        batches: list[tuple[float, tuple[int, ...], int]] = []
         index = 0
         while index < len(self._events):
             batch_time = self._events[index].time
@@ -237,21 +245,30 @@ class MidiPlayer:
             while index < len(self._events) and abs(self._events[index].time - batch_time) < 0.0005:
                 batch.append(self._events[index])
                 index += 1
-            # v0.0.3 supports the unlocked C3-B6 range only. Notes outside it
-            # remain intentionally silent and must not move the visible bank.
+            # Ignore notes outside the physical A0-C8 keyboard so they do not
+            # cause unnecessary range movement.
             pitches = tuple(
                 event.note + self._transpose for event in batch
                 if event.pressed and
-                self._normal_first_note <= event.note + self._transpose <= self._supported_last_note
+                self._supported_first_note <= event.note + self._transpose <= self._supported_last_note
             )
             if not pitches:
                 continue
             compatible = any(all(pitch in mapping for pitch in pitches)
                              for mapping in self._state_mappings.values())
-            pulse = (not compatible and
-                     all(pitch in self._mapping or pitch in self._high_mapping for pitch in pitches) and
-                     any(pitch in self._high_mapping for pitch in pitches))
-            batches.append((batch_time, pitches, pulse))
+            split_supported = all(
+                pitch in self._low_mapping
+                or pitch in self._mapping
+                or pitch in self._high_mapping
+                for pitch in pitches
+            )
+            pulse_moves = 0
+            if not compatible and split_supported:
+                if any(pitch in self._low_mapping for pitch in pitches):
+                    pulse_moves += 2  # < then >
+                if any(pitch in self._high_mapping for pitch in pitches):
+                    pulse_moves += 2  # > then <
+            batches.append((batch_time, pitches, pulse_moves))
 
         def path_cost(start: KeyboardState, end: KeyboardState) -> int:
             return sum(CONTROL_COST[key] for key in KEYBOARD_PATHS[(start, end)])
@@ -262,7 +279,7 @@ class MidiPlayer:
         }
         history: list[dict[KeyboardState, tuple[KeyboardState, KeyboardState | str]]] = []
 
-        for _, pitches, pulse in batches:
+        for _, pitches, pulse_moves in batches:
             next_scores = {state: 10**12 for state in KEYBOARD_STATES}
             choices: dict[KeyboardState, tuple[KeyboardState, KeyboardState | str]] = {}
 
@@ -279,9 +296,10 @@ class MidiPlayer:
                 for target, mapping in self._state_mappings.items():
                     if all(pitch in mapping for pitch in pitches):
                         offer(target, previous, path_cost(previous, target), target)
-                if pulse:
-                    # Return to C3-B5, play C3-B5, pulse > for C6-B6, then <.
-                    pulse_cost = path_cost(previous, INITIAL_KEYBOARD_STATE) + 240
+                if pulse_moves:
+                    # Return to C3-B5 and briefly visit the required outer
+                    # banks, always ending back at the initial view.
+                    pulse_cost = path_cost(previous, INITIAL_KEYBOARD_STATE) + 120 * pulse_moves
                     offer(INITIAL_KEYBOARD_STATE, previous, pulse_cost, "pulse")
             scores = next_scores
             history.append(choices)
@@ -299,7 +317,7 @@ class MidiPlayer:
         shift_taps = 0
         pulse_batches = 0
         control_taps = 0
-        for (batch_time, _, _), action in zip(batches, actions):
+        for (batch_time, _, pulse_moves), action in zip(batches, actions):
             target = INITIAL_KEYBOARD_STATE if action == "pulse" else action
             sequence = KEYBOARD_PATHS[(simulated_state, target)]
             shift_taps += sum(key == "LSHIFT" for key in sequence)
@@ -307,7 +325,7 @@ class MidiPlayer:
             simulated_state = target
             if action == "pulse":
                 pulse_batches += 1
-                control_taps += 2
+                control_taps += pulse_moves
             self._octave_plan[batch_time] = action
         final_sequence = KEYBOARD_PATHS[(simulated_state, INITIAL_KEYBOARD_STATE)]
         shift_taps += sum(key == "LSHIFT" for key in final_sequence)
@@ -521,44 +539,50 @@ class MidiPlayer:
 
         self._set_keyboard_state_locked(INITIAL_KEYBOARD_STATE)
 
+        low_attacks = [
+            event for event in events
+            if event.pressed and event.note + self._transpose in self._low_mapping
+        ]
         high_attacks = [
             event for event in events
             if event.pressed and event.note + self._transpose in self._high_mapping
         ]
         for event in events:
-            if event.note + self._transpose not in self._high_mapping:
+            pitch = event.note + self._transpose
+            if pitch not in self._low_mapping and pitch not in self._high_mapping:
                 self._dispatch_locked(event)
-        if not high_attacks:
+        if not low_attacks and not high_attacks:
             return
 
         # Never carry a physical key hold across a keyboard-bank change; its
         # later key-up could otherwise release a different displayed note.
         self._release_all_locked()
-        high_keys = list(dict.fromkeys(
-            self._high_mapping[event.note + self._transpose] for event in high_attacks
-        ))
         pressed: list[str] = []
         try:
-            self._set_keyboard_state_locked((3, 0))
-            for key in high_keys:
-                self._send(key, True)
-                pressed.append(key)
-            time.sleep(max(0.008, min(0.020, self._octave_switch_delay)))
-            for key in reversed(pressed):
-                self._send(key, False)
-            pressed.clear()
-            self._set_keyboard_state_locked(INITIAL_KEYBOARD_STATE)
+            for attacks, mapping, target in (
+                (low_attacks, self._low_mapping, (-3, 0)),
+                (high_attacks, self._high_mapping, (3, 0)),
+            ):
+                if not attacks:
+                    continue
+                keys = list(dict.fromkeys(
+                    mapping[event.note + self._transpose] for event in attacks
+                ))
+                self._set_keyboard_state_locked(target)
+                for key in keys:
+                    self._send(key, True)
+                    pressed.append(key)
+                time.sleep(max(0.008, min(0.020, self._octave_switch_delay)))
+                for key in reversed(pressed):
+                    self._send(key, False)
+                pressed.clear()
+                self._set_keyboard_state_locked(INITIAL_KEYBOARD_STATE)
         except Exception as exc:
             for key in reversed(pressed):
                 try:
                     self._send(key, False)
                 except Exception:
                     pass
-            # Best effort return to the normal bank after a partial sequence.
-            try:
-                self._tap_control_locked(",")
-            except Exception:
-                pass
             self._state = "paused"
             self._restore_normal_keyboard_locked()
             self._on_error(f"4オクターブ自動切替に失敗しました: {exc}")
