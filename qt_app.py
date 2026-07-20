@@ -29,6 +29,12 @@ from PySide6.QtWidgets import (
 )
 
 from config_store import default_mapping, load_config, mapping_for_game_octave, save_config
+from instruments import (
+    DEFAULT_INSTRUMENT,
+    DEFAULT_UNLOCK_STAGE,
+    INSTRUMENTS,
+    instrument_profile,
+)
 from keyboard_input import WindowInfo, focus_window, list_windows, send_key, window_rect
 from midi_parser import MidiError, MidiSong, load_midi, note_name
 from player import MidiPlayer
@@ -69,6 +75,20 @@ def gear_icon(size: int = 18) -> QIcon:
          stroke="{ICON_BLUE}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <circle cx="12" cy="12" r="3"/>
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>""", size)
+
+
+def keyboard_icon(size: int = 18) -> QIcon:
+    """A keyboard seen head on: the case with three black keys hanging in it.
+
+    Drawing the black keys as strokes rather than filled rectangles keeps them
+    apart at the 18px the header actually uses; filled keys merge into a block.
+    """
+    return svg_icon(f"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+         stroke="{ICON_BLUE}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2.5" y="6" width="19" height="12" rx="1.5"/>
+      <path stroke-width="2.2" stroke-linecap="butt" d="M7.6 6.5v5.2M12 6.5v5.2M16.4 6.5v5.2"/>
     </svg>""", size)
 
 
@@ -319,20 +339,26 @@ class AlertDialog(QDialog):
             self.move(parent_rect.center() - self.rect().center())
 
 
-class OptionsWindow(QWidget):
-    closed = Signal()
+class PopoutWindow(QWidget):
+    """Shared chrome for the panels that hang off the main window.
 
-    def __init__(self, owner: "ResonanceMidiWindow"):
+    Only one of them is ever visible; the owner closes the other one first.
+    """
+
+    closed = Signal()
+    heading = ""
+
+    def __init__(self, owner: "ResonanceMidiWindow", width: int, height: int):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.owner = owner
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowTitle("Resonance MIDI Player - Options")
-        self.setFixedSize(650, 326)
-        self._build()
+        self.setWindowTitle(f"Resonance MIDI Player - {self.heading.title()}")
+        self.setFixedSize(width, height)
+        self._build(self._build_chrome())
         self.owner.scale_widget_tree(self)
         self.owner.apply_background_style(self)
 
-    def _build(self) -> None:
+    def _build_chrome(self) -> QVBoxLayout:
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -352,7 +378,7 @@ class OptionsWindow(QWidget):
         header.setFixedHeight(32)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(8, 0, 0, 0)
-        title = QLabel("OPTIONS")
+        title = QLabel(self.heading)
         title.setObjectName("windowTitle")
         title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         header_layout.addWidget(title)
@@ -361,7 +387,38 @@ class OptionsWindow(QWidget):
         close.clicked.connect(self.close)
         header_layout.addWidget(close)
         body.addWidget(header)
+        return body
 
+    def _build(self, body: QVBoxLayout) -> None:
+        raise NotImplementedError
+
+    def _form_row(self, layout: QVBoxLayout, label: str, control: QWidget) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(QLabel(label))
+        row.addStretch()
+        control.setMinimumWidth(215)
+        row.addWidget(control)
+        layout.addLayout(row)
+
+    def show_front(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def closeEvent(self, event) -> None:
+        self.owner.save()
+        self.closed.emit()
+        super().closeEvent(event)
+
+
+class OptionsWindow(PopoutWindow):
+    heading = "OPTIONS"
+
+    def __init__(self, owner: "ResonanceMidiWindow"):
+        super().__init__(owner, 650, 326)
+
+    def _build(self, body: QVBoxLayout) -> None:
         columns = QHBoxLayout()
         columns.setContentsMargins(0, 0, 0, 0)
         columns.setSpacing(6)
@@ -372,15 +429,6 @@ class OptionsWindow(QWidget):
         body.addLayout(columns, 1)
         self._build_play_settings(play_panel)
         self._build_view_settings(view_panel)
-
-    def _form_row(self, layout: QVBoxLayout, label: str, control: QWidget) -> None:
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(QLabel(label))
-        row.addStretch()
-        control.setMinimumWidth(215)
-        row.addWidget(control)
-        layout.addLayout(row)
 
     def _build_play_settings(self, panel: QFrame) -> None:
         layout = QVBoxLayout(panel)
@@ -502,15 +550,81 @@ class OptionsWindow(QWidget):
         self.owner.apply_background_style(self.owner)
         self.owner.apply_background_style(self)
 
-    def show_front(self) -> None:
-        self.show()
-        self.raise_()
-        self.activateWindow()
 
-    def closeEvent(self, event) -> None:
-        self.owner.save()
-        self.closed.emit()
-        super().closeEvent(event)
+class InstrumentWindow(PopoutWindow):
+    heading = "INSTRUMENT"
+
+    def __init__(self, owner: "ResonanceMidiWindow"):
+        super().__init__(owner, 650, 208)
+
+    def _build(self, body: QVBoxLayout) -> None:
+        panel = self.owner.panel()
+        body.addWidget(panel, 1)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+        heading = QLabel("楽器設定")
+        heading.setObjectName("sectionTitle")
+        layout.addWidget(heading)
+
+        self.instrument = QComboBox()
+        for index, profile in enumerate(INSTRUMENTS):
+            self.instrument.addItem(profile.label, profile.key)
+            if not profile.selectable:
+                # Kept visible so the unsupported instruments are discoverable,
+                # but unselectable until their behaviour has been verified.
+                item = self.instrument.model().item(index)
+                item.setEnabled(False)
+                item.setToolTip(profile.note)
+        self.instrument.setCurrentIndex(
+            max(0, self.instrument.findData(self.owner.instrument))
+        )
+        self.instrument.currentIndexChanged.connect(self._instrument_changed)
+        self._form_row(layout, "楽器", self.instrument)
+
+        self.stage = QComboBox()
+        self.stage.currentIndexChanged.connect(self._stage_changed)
+        self._form_row(layout, "音域の解放段階", self.stage)
+
+        self.range_label = QLabel("")
+        self.range_label.setObjectName("strongLabel")
+        self._form_row(layout, "発音できる音域", self.range_label)
+
+        self.correction = QCheckBox("音域外の音をオクターブ単位で音域内へ補正する")
+        self.correction.setChecked(self.owner.range_correction)
+        self.correction.toggled.connect(
+            lambda value: self.owner.update_setting("range_correction", value)
+        )
+        layout.addWidget(self.correction)
+        hint = QLabel("補正はフレーズ単位でまとめて移動します。オフなら音域外は従来どおり鳴りません。")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch()
+        self._reload_stages()
+
+    def _reload_stages(self) -> None:
+        profile = instrument_profile(self.owner.instrument)
+        self.stage.blockSignals(True)
+        self.stage.clear()
+        for step in profile.stages:
+            self.stage.addItem(step.label)
+        self.stage.setCurrentIndex(profile.clamp_stage(self.owner.unlock_stage))
+        self.stage.setEnabled(len(profile.stages) > 1)
+        self.stage.blockSignals(False)
+        self._refresh_range_label()
+
+    def _refresh_range_label(self) -> None:
+        profile = instrument_profile(self.owner.instrument)
+        low, high = profile.sounding_range(48, self.owner.unlock_stage)
+        self.range_label.setText(f"{note_name(low)} - {note_name(high)}")
+
+    def _instrument_changed(self, index: int) -> None:
+        self.owner.update_setting("instrument", self.instrument.itemData(index))
+        self._reload_stages()
+
+    def _stage_changed(self, index: int) -> None:
+        self.owner.update_setting("unlock_stage", index)
+        self._refresh_range_label()
 
 
 class ResonanceMidiWindow(QWidget):
@@ -520,6 +634,7 @@ class ResonanceMidiWindow(QWidget):
         self.song: MidiSong | None = None
         self.windows: list[WindowInfo] = []
         self.options_window: OptionsWindow | None = None
+        self.instrument_window: InstrumentWindow | None = None
         self._track_position = False
         self.position_save_timer = QTimer(self)
         self.position_save_timer.setSingleShot(True)
@@ -533,6 +648,13 @@ class ResonanceMidiWindow(QWidget):
         self.press_ms = int(self.config.get("press_ms", 80))
         self.octave_switch_ms = int(self.config.get("octave_switch_ms", 18))
         self.ignore_drums = bool(self.config.get("ignore_drums", True))
+        self.instrument = str(self.config.get("instrument", DEFAULT_INSTRUMENT))
+        if not instrument_profile(self.instrument).selectable:
+            self.instrument = DEFAULT_INSTRUMENT
+        self.unlock_stage = instrument_profile(self.instrument).clamp_stage(
+            self.config.get("unlock_stage", DEFAULT_UNLOCK_STAGE)
+        )
+        self.range_correction = bool(self.config.get("range_correction", False))
         self.auto_octave = bool(self.config.get("auto_octave_switch", True))
         self.game_octave_offset = max(-3, min(3, int(self.config.get("game_octave_offset", 0))))
         self.countdown = max(0, min(10, int(self.config.get("countdown", 3))))
@@ -605,10 +727,13 @@ class ResonanceMidiWindow(QWidget):
         title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         header_layout.addWidget(title)
         header_layout.addStretch()
+        self.instrument_button = self.icon_button(keyboard_icon(18), "楽器設定", 32)
+        self.instrument_button.clicked.connect(self.open_instruments)
         self.gear_button = self.icon_button(gear_icon(18), "オプション", 32)
         self.gear_button.clicked.connect(self.open_options)
         self.close_button = self.icon_button(simple_icon("close", WHITE, 15), "閉じる", 32)
         self.close_button.clicked.connect(self.close)
+        header_layout.addWidget(self.instrument_button)
         header_layout.addWidget(self.gear_button)
         header_layout.addWidget(self.close_button)
         body.addWidget(header)
@@ -798,6 +923,8 @@ class ResonanceMidiWindow(QWidget):
         self.ui_scale = value
         self.config["ui_scale"] = value
         self.scale_widget_tree(self)
+        if self.instrument_window is not None:
+            self.scale_widget_tree(self.instrument_window)
         if self.options_window is not None:
             self.scale_widget_tree(self.options_window)
             self.options_window.scale_value.setText(f"{value:.1f}x")
@@ -1077,38 +1204,56 @@ class ResonanceMidiWindow(QWidget):
                 self._focus_target()
             mapping = mapping_for_game_octave(default_mapping(), 0 if auto else self.game_octave_offset)
             self.player.configure(mapping, self.transpose, self.speed, self.press_ms,
-                                  self.ignore_drums, auto, self.octave_switch_ms)
+                                  self.ignore_drums, auto, self.octave_switch_ms,
+                                  self.instrument, self.unlock_stage, self.range_correction)
         except AttributeError:
             pass
 
     def open_options(self) -> None:
+        # Both panels occupy the same spot below the window, so opening one
+        # always dismisses the other.
+        if self.instrument_window is not None:
+            self.instrument_window.close()
         if self.options_window is None:
             self.options_window = OptionsWindow(self)
             self.options_window.closed.connect(self._options_closed)
         self.anchor_options()
         self.options_window.show_front()
 
-    def anchor_options(self) -> None:
+    def open_instruments(self) -> None:
         if self.options_window is not None:
-            screen = QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
-            if screen is None:
-                self.options_window.move(self.x(), self.y() + self.height() + 1)
-                return
-            area = screen.availableGeometry()
-            gap = max(1, round(self.ui_scale))
-            x = min(
-                max(self.x(), area.left()),
-                max(area.left(), area.right() - self.options_window.width() + 1),
-            )
-            below = self.y() + self.height() + gap
-            above = self.y() - self.options_window.height() - gap
-            if below + self.options_window.height() - 1 <= area.bottom():
-                y = below
-            elif above >= area.top():
-                y = above
-            else:
-                y = area.top()
-            self.options_window.move(x, y)
+            self.options_window.close()
+        if self.instrument_window is None:
+            self.instrument_window = InstrumentWindow(self)
+            self.instrument_window.closed.connect(self._instrument_closed)
+        self.anchor_options()
+        self.instrument_window.show_front()
+
+    def anchor_options(self) -> None:
+        for window in (self.options_window, self.instrument_window):
+            if window is not None:
+                self._anchor_popout(window)
+
+    def _anchor_popout(self, window: QWidget) -> None:
+        screen = QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
+        if screen is None:
+            window.move(self.x(), self.y() + self.height() + 1)
+            return
+        area = screen.availableGeometry()
+        gap = max(1, round(self.ui_scale))
+        x = min(
+            max(self.x(), area.left()),
+            max(area.left(), area.right() - window.width() + 1),
+        )
+        below = self.y() + self.height() + gap
+        above = self.y() - window.height() - gap
+        if below + window.height() - 1 <= area.bottom():
+            y = below
+        elif above >= area.top():
+            y = above
+        else:
+            y = area.top()
+        window.move(x, y)
 
     def moveEvent(self, event) -> None:
         super().moveEvent(event)
@@ -1141,6 +1286,11 @@ class ResonanceMidiWindow(QWidget):
             self.options_window.deleteLater()
         self.options_window = None
 
+    def _instrument_closed(self) -> None:
+        if self.instrument_window is not None:
+            self.instrument_window.deleteLater()
+        self.instrument_window = None
+
     def set_topmost(self, value: bool, save_value: bool = True) -> None:
         self.topmost = bool(value)
         flags = self.windowFlags()
@@ -1172,6 +1322,8 @@ class ResonanceMidiWindow(QWidget):
         self.config["window_y"] = self.y()
         if self.options_window is not None:
             self.options_window.close()
+        if self.instrument_window is not None:
+            self.instrument_window.close()
         if self.player.keyboard_shifted:
             self._focus_target()
         self.player.close()
