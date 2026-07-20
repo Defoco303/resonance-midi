@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from instruments import DEFAULT_INSTRUMENT, DEFAULT_UNLOCK_STAGE
+
 
 APP_DIR = Path(os.getenv("APPDATA", Path.home())) / "ResonanceMidiPlayer"
 CONFIG_PATH = APP_DIR / "config.json"
@@ -40,7 +42,7 @@ def default_mapping(base_note: int = 48) -> dict[int, str]:
 
 
 DEFAULT_CONFIG = {
-    "config_version": 10,
+    "config_version": 11,
     "mapping": {str(note): key for note, key in default_mapping().items()},
     "speed": 1.0,
     "transpose": 0,
@@ -49,6 +51,12 @@ DEFAULT_CONFIG = {
     "octave_switch_ms": 20,
     "press_ms": 1,
     "ignore_drums": True,
+    # Only the keyboard profile is selectable; see instruments.py. The unlock
+    # stage defaults to fully unlocked so an existing config keeps behaving
+    # exactly as it did before this setting existed.
+    "instrument": DEFAULT_INSTRUMENT,
+    "unlock_stage": DEFAULT_UNLOCK_STAGE,
+    "range_correction": False,
     "countdown": 3,
     "check_sustain_state": True,
     "ui_scale": 1.0,
@@ -84,7 +92,8 @@ def load_config() -> dict:
                 loaded["target_title"] = DEFAULT_CONFIG["target_title"]
             if int(loaded.get("config_version", 1)) < 7 and loaded.get("opacity", 1.0) == 1.0:
                 loaded["opacity"] = 0.8
-            loaded["config_version"] = 10
+            # v11 only adds keys, which the DEFAULT_CONFIG merge below supplies.
+            loaded["config_version"] = 11
             result.update(loaded)
         if not isinstance(result.get("mapping"), dict):
             result["mapping"] = dict(DEFAULT_CONFIG["mapping"])

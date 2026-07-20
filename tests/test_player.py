@@ -408,5 +408,62 @@ class PlayerTests(unittest.TestCase):
             player.close()
 
 
+class InstrumentRangeTests(unittest.TestCase):
+    MAPPING = {48: "Z", 60: "A", 72: "Q"}
+
+    def _song(self, *pitches: int) -> MidiSong:
+        notes = tuple(
+            MidiNote(0.10 + index * 0.02, 0.14 + index * 0.02, pitch, 100, 0, 0)
+            for index, pitch in enumerate(pitches)
+        )
+        return MidiSong(Path("stage.mid"), "stage", 0.4, notes, ("track",), 120)
+
+    def _play(self, pitches, stage, correction, auto=False):
+        sent = []
+        player = MidiPlayer(lambda key, down: sent.append((key, down)),
+                            lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(self.MAPPING, 0, 1.0, 1, auto_octave=auto,
+                             octave_switch_ms=0, instrument="keyboard",
+                             unlock_stage=stage, range_correction=correction)
+            player.load(self._song(*pitches))
+            stats = player.range_stats
+            player.play()
+            time.sleep(0.35)
+            return sent, stats
+        finally:
+            player.close()
+
+    def test_initial_unlock_silences_notes_above_b4(self):
+        # C6 is inside the physical keyboard but grey until achievement 1.
+        sent, stats = self._play((84,), stage=0, correction=False)
+        self.assertEqual(sent, [])
+        self.assertEqual(stats["unplayable_notes"], 1)
+        self.assertEqual(stats["folded_notes"], 0)
+
+    def test_range_correction_folds_c6_into_the_initial_unlock(self):
+        sent, stats = self._play((84,), stage=0, correction=True)
+        self.assertIn(("A", True), sent)  # C6 lands on C4
+        self.assertEqual(stats["unplayable_notes"], 0)
+        self.assertEqual(stats["folded_notes"], 1)
+
+    def test_full_unlock_reaches_c6_through_the_high_bank(self):
+        sent, stats = self._play((84,), stage=3, correction=True, auto=True)
+        self.assertEqual(stats["folded_notes"], 0)  # nothing to correct
+        self.assertEqual(stats["unplayable_notes"], 0)
+        # One Shift is cheaper than >, and C6 is Q in the C4-B6 view.
+        self.assertIn(("LSHIFT", True), sent)
+        self.assertIn(("Q", True), sent)
+
+    def test_bass_profile_starts_in_the_left_window(self):
+        player = MidiPlayer(lambda *_: None, lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(self.MAPPING, 0, 1.0, 1, instrument="bass")
+            self.assertEqual(player._initial_state, (-3, 0))
+            self.assertFalse(player.keyboard_shifted)
+        finally:
+            player.close()
+
+
 if __name__ == "__main__":
     unittest.main()
