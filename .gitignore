@@ -14,3 +14,6 @@ songs/
 # Legacy UI and local MIDI-arrangement helpers are not part of the app release.
 /app.py
 /scripts/
+
+# AIエージェント向けの内部引き継ぎ資料。配布用リポジトリには公開しない。
+CLAUDE.md
