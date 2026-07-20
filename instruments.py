@@ -66,35 +66,59 @@ KEYBOARD = InstrumentProfile(
     selectable=True,
 )
 
-# The three profiles below come from CLAUDE.md 10.1. Their ranges were read
-# off the game UI, but no unlock order is known and none of them has been
-# played through this tool, so they stay unselectable.
+# The three profiles below have their ranges and unlock order from the user
+# (2026-07-26), but stay unselectable: the switch rules were never checked
+# against these instruments, and each has non-range unlocks (playing
+# techniques) whose input is unknown. Stages are cumulative like the keyboard.
+#
+# Guitar also unlocks harmonics / overdrive / distortion. These are playing
+# techniques, not extra range, and how the game triggers them is unknown, so
+# only the pitch range is modelled here.
 GUITAR = InstrumentProfile(
     key="guitar",
     label="ギター",
     initial_state=(0, 0),
-    stages=(UnlockStage("E2-D6", -8, 38),),
+    stages=(
+        UnlockStage("初期状態（C3-B4）", 0, 23),
+        UnlockStage("開放①（E2-B4）", -8, 23),
+        UnlockStage("開放②（E2-D6）", -8, 38),
+    ),
     selectable=False,
-    note="音域の解放順が未検証のため選択できません。",
+    note="切替ルールと奏法（ハーモニクス等）が未確認のため選択できません。",
 )
 
+# Bass opens on the left window, not the middle. It also unlocks mute /
+# harmonics / slap / overdrive as playing techniques, handled the same as
+# guitar: range only.
 BASS = InstrumentProfile(
     key="bass",
     label="ベース",
-    initial_state=(-3, 0),  # Bass opens on the left window, not the middle.
-    stages=(UnlockStage("E1-F4", -20, 17),),
+    initial_state=(-3, 0),
+    stages=(
+        UnlockStage("初期状態（E1-B2）", -20, -1),
+        UnlockStage("開放①（E1-F4）", -20, 17),
+    ),
     selectable=False,
-    note="音域の解放順が未検証のため選択できません。",
+    note="切替ルールと奏法（ミュート等）が未確認のため選択できません。",
 )
 
 # Drums are not a transposition problem at all: MIDI channel 10 pitches are
 # General MIDI percussion numbers, so they need a lookup table rather than an
-# octave shift. See CLAUDE.md 10.2.
+# octave shift. See CLAUDE.md 10.2. The stages below are the user's best guess
+# (2026-07-26) and unconfirmed; the added ranges also leave gaps, which the
+# contiguous range model here cannot represent. Kept only as a placeholder.
+#   初期 A4-E5  スネア / トム
+#   開放① C4-G4?  バスドラム / ハイハット
+#   開放② F5-B5?  クラッシュ / ライド
 DRUMS = InstrumentProfile(
     key="drums",
     label="ドラム",
     initial_state=(0, 0),
-    stages=(UnlockStage("C4-B5", 12, 35),),
+    stages=(
+        UnlockStage("初期状態（A4-E5・スネア/トム）", 21, 28),
+        UnlockStage("開放①（C4-E5・未確証）", 12, 28),
+        UnlockStage("開放②（C4-B5・未確証）", 12, 35),
+    ),
     selectable=False,
     note="打楽器番号とゲーム24鍵の対応表が未調査のため選択できません。",
 )
