@@ -79,17 +79,15 @@ def gear_icon(size: int = 18) -> QIcon:
     </svg>""", size)
 
 
-def keyboard_icon(size: int = 18) -> QIcon:
-    """A keyboard seen head on: the case with three black keys hanging in it.
-
-    Drawing the black keys as strokes rather than filled rectangles keeps them
-    apart at the 18px the header actually uses; filled keys merge into a block.
-    """
+def eighth_note_icon(size: int = 18) -> QIcon:
+    """A single eighth note. The head is slanted the way engraving draws it."""
     return svg_icon(f"""
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
          stroke="{ICON_BLUE}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="2.5" y="6" width="19" height="12" rx="1.5"/>
-      <path stroke-width="2.2" stroke-linecap="butt" d="M7.6 6.5v5.2M12 6.5v5.2M16.4 6.5v5.2"/>
+      <ellipse cx="8.6" cy="17.6" rx="4.3" ry="3.1" fill="{ICON_BLUE}" stroke="none"
+               transform="rotate(-20 8.6 17.6)"/>
+      <path d="M12.7 16.6V4.2"/>
+      <path d="M12.7 4.6c3.4 1.2 5.2 3.2 5 6.4"/>
     </svg>""", size)
 
 
@@ -558,7 +556,7 @@ class InstrumentWindow(PopoutWindow):
     heading = "RANGE CORRECTION"
 
     def __init__(self, owner: "ResonanceMidiWindow"):
-        super().__init__(owner, 650, 244)
+        super().__init__(owner, 650, 176)
 
     def _build(self, body: QVBoxLayout) -> None:
         panel = self.owner.panel()
@@ -597,20 +595,10 @@ class InstrumentWindow(PopoutWindow):
         self.stage.currentIndexChanged.connect(self._stage_changed)
         self.stage_caption = self._form_row(layout, "音域の解放段階", self.stage)
 
-        self.range_label = QLabel("")
-        self.range_label.setObjectName("strongLabel")
-        self.range_caption = self._form_row(layout, "発音できる音域", self.range_label)
         layout.addStretch()
-
-        export_row = QHBoxLayout()
-        export_row.addWidget(QLabel("実際に鳴る通りのMIDIを書き出して確認できます"))
-        export_row.addStretch()
-        self.export_button = QPushButton("MIDIに書き出す")
-        self.export_button.setObjectName("midiButton")
-        self.export_button.setFixedSize(140, 30)
-        self.export_button.clicked.connect(self.owner.export_audible_midi)
-        export_row.addWidget(self.export_button)
-        layout.addLayout(export_row)
+        # ResonanceMidiWindow.export_audible_midi() and midi_writer are kept
+        # deliberately: the export is still the only way to audition the
+        # correction away from the game, it just has no button right now.
         self._reload_stages()
 
     def _correction_toggled(self, value: bool) -> None:
@@ -621,8 +609,7 @@ class InstrumentWindow(PopoutWindow):
         """Grey out the range settings while the correction is switched off."""
         on = self.correction.isChecked()
         profile = instrument_profile(self.owner.instrument)
-        for widget in (self.instrument, self.instrument_caption,
-                       self.stage_caption, self.range_caption, self.range_label):
+        for widget in (self.instrument, self.instrument_caption, self.stage_caption):
             widget.setEnabled(on)
         self.stage.setEnabled(on and len(profile.stages) > 1)
 
@@ -635,12 +622,6 @@ class InstrumentWindow(PopoutWindow):
         self.stage.setCurrentIndex(profile.clamp_stage(self.owner.unlock_stage))
         self.stage.blockSignals(False)
         self._apply_enabled()
-        self._refresh_range_label()
-
-    def _refresh_range_label(self) -> None:
-        profile = instrument_profile(self.owner.instrument)
-        low, high = profile.sounding_range(48, self.owner.unlock_stage)
-        self.range_label.setText(f"{note_name(low)} - {note_name(high)}")
 
     def _instrument_changed(self, index: int) -> None:
         self.owner.update_setting("instrument", self.instrument.itemData(index))
@@ -648,7 +629,6 @@ class InstrumentWindow(PopoutWindow):
 
     def _stage_changed(self, index: int) -> None:
         self.owner.update_setting("unlock_stage", index)
-        self._refresh_range_label()
 
 
 class ResonanceMidiWindow(QWidget):
@@ -751,7 +731,7 @@ class ResonanceMidiWindow(QWidget):
         title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         header_layout.addWidget(title)
         header_layout.addStretch()
-        self.instrument_button = self.icon_button(keyboard_icon(18), "音域補正（ベータ）", 32)
+        self.instrument_button = self.icon_button(eighth_note_icon(18), "音域補正（ベータ）", 32)
         self.instrument_button.clicked.connect(self.open_instruments)
         self.gear_button = self.icon_button(gear_icon(18), "オプション", 32)
         self.gear_button.clicked.connect(self.open_options)
