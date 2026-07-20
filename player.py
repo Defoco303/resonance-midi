@@ -14,7 +14,7 @@ from instruments import (
     InstrumentProfile,
     instrument_profile,
 )
-from midi_parser import MidiSong
+from midi_parser import MidiNote, MidiSong
 from range_correction import fold_notes
 
 
@@ -120,6 +120,7 @@ class MidiPlayer:
         self._supported_first_note = 21
         self._supported_last_note = 108
         self._range_stats = {"folded_notes": 0, "unplayable_notes": 0}
+        self._audible_notes: list[MidiNote] = []
         self._state_mappings: dict[KeyboardState, dict[int, str]] = {}
         self._low_mapping: dict[int, str] = {}
         self._high_mapping: dict[int, str] = {}
@@ -159,6 +160,17 @@ class MidiPlayer:
     def range_stats(self) -> dict[str, int]:
         with self._lock:
             return dict(self._range_stats)
+
+    @property
+    def audible_notes(self) -> list[MidiNote]:
+        """The notes that will actually sound, at the pitch they will sound.
+
+        Drum exclusion, transpose and range correction are already applied and
+        anything the current view cannot reach has been dropped, so writing
+        this out gives a faithful preview of the performance.
+        """
+        with self._lock:
+            return list(self._audible_notes)
 
     @property
     def keyboard_shifted(self) -> bool:
@@ -242,8 +254,15 @@ class MidiPlayer:
                 self._build_octave_plan_locked()
         self._wake.set()
 
+    def _will_sound_locked(self, pitch: int) -> bool:
+        """Whether a key exists for this pitch in a view the player can reach."""
+        if self._auto_octave:
+            return any(pitch in mapping for mapping in self._state_mappings.values())
+        return pitch in self._mapping
+
     def _build_events_locked(self) -> None:
         events: list[TimedEvent] = []
+        audible: list[MidiNote] = []
         self._range_stats = {"folded_notes": 0, "unplayable_notes": 0}
         if self._song:
             notes = [
@@ -266,12 +285,19 @@ class MidiPlayer:
                     self._range_stats["unplayable_notes"] += 1
                 if shift:
                     self._range_stats["folded_notes"] += 1
+                if self._will_sound_locked(pitch + self._transpose):
+                    # Keep the sounding pitch so an export matches what is
+                    # heard in game, not what the file originally said.
+                    audible.append(MidiNote(note.start, note.end,
+                                            pitch + self._transpose, note.velocity,
+                                            note.channel, note.track))
                 end = note.end if self._press_ms == 0 else min(note.end, note.start + self._press_ms / 1000)
                 end = max(end, note.start + 0.008)
                 events.append(TimedEvent(note.start, True, pitch))
                 events.append(TimedEvent(end, False, pitch))
         # Releases come first when a re-trigger occurs at precisely the same time.
         events.sort(key=lambda item: (item.time, item.pressed, item.note))
+        self._audible_notes = audible
         self._events = events
         self._event_times = [item.time for item in events]
         self._build_octave_plan_locked()

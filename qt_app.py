@@ -37,6 +37,7 @@ from instruments import (
 )
 from keyboard_input import WindowInfo, focus_window, list_windows, send_key, window_rect
 from midi_parser import MidiError, MidiSong, load_midi, note_name
+from midi_writer import write_midi
 from player import MidiPlayer
 from sustain_detector import SustainState, capture_screen_rect, detect_sustain_state
 
@@ -555,7 +556,7 @@ class InstrumentWindow(PopoutWindow):
     heading = "INSTRUMENT"
 
     def __init__(self, owner: "ResonanceMidiWindow"):
-        super().__init__(owner, 650, 208)
+        super().__init__(owner, 650, 244)
 
     def _build(self, body: QVBoxLayout) -> None:
         panel = self.owner.panel()
@@ -600,6 +601,16 @@ class InstrumentWindow(PopoutWindow):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         layout.addStretch()
+
+        export_row = QHBoxLayout()
+        export_row.addWidget(QLabel("実際に鳴る通りのMIDIを書き出して確認できます"))
+        export_row.addStretch()
+        self.export_button = QPushButton("MIDIに書き出す")
+        self.export_button.setObjectName("midiButton")
+        self.export_button.setFixedSize(140, 30)
+        self.export_button.clicked.connect(self.owner.export_audible_midi)
+        export_row.addWidget(self.export_button)
+        layout.addLayout(export_row)
         self._reload_stages()
 
     def _reload_stages(self) -> None:
@@ -1208,6 +1219,39 @@ class ResonanceMidiWindow(QWidget):
                                   self.instrument, self.unlock_stage, self.range_correction)
         except AttributeError:
             pass
+
+    def export_audible_midi(self) -> None:
+        """Write out exactly what the player will send, for listening to."""
+        if self.song is None:
+            self.show_alert("MIDIの書き出し", "先にMIDIファイルを読み込んでください。")
+            return
+        notes = self.player.audible_notes
+        if not notes:
+            self.show_alert("MIDIの書き出し",
+                            "鳴らせる音がありません。楽器設定の音域を確認してください。")
+            return
+        source = Path(self.song.path)
+        target, _ = QFileDialog.getSaveFileName(
+            self, "補正結果の書き出し",
+            str(source.with_name(f"{source.stem}.corrected.mid")),
+            "MIDIファイル (*.mid)",
+        )
+        if not target:
+            return
+        try:
+            written = write_midi(target, notes)
+        except OSError as exc:
+            self.show_alert("MIDIの書き出し", f"書き出しに失敗しました。\n{exc}")
+            return
+        stats = self.player.range_stats
+        dropped = len(self.song.notes) - written
+        self.show_alert(
+            "MIDIの書き出し",
+            f"{Path(target).name} を書き出しました。\n\n"
+            f"書き出した音: {written}\n"
+            f"音域補正で移動した音: {stats['folded_notes']}\n"
+            f"鳴らないため除外した音: {dropped}",
+        )
 
     def open_options(self) -> None:
         # Both panels occupy the same spot below the window, so opening one

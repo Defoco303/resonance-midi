@@ -455,6 +455,36 @@ class InstrumentRangeTests(unittest.TestCase):
         self.assertIn(("LSHIFT", True), sent)
         self.assertIn(("Q", True), sent)
 
+    def test_audible_notes_report_the_pitch_that_will_sound(self):
+        player = MidiPlayer(lambda *_: None, lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(self.MAPPING, 0, 1.0, 1, auto_octave=False,
+                             unlock_stage=0, range_correction=True)
+            player.load(self._song(84))  # C6, folded down to C4
+            self.assertEqual([note.note for note in player.audible_notes], [60])
+        finally:
+            player.close()
+
+    def test_audible_notes_drop_what_cannot_be_reached(self):
+        player = MidiPlayer(lambda *_: None, lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(self.MAPPING, 0, 1.0, 1, auto_octave=False,
+                             unlock_stage=0, range_correction=False)
+            player.load(self._song(84))
+            self.assertEqual(player.audible_notes, [])
+        finally:
+            player.close()
+
+    def test_audible_notes_include_the_transpose(self):
+        player = MidiPlayer(lambda *_: None, lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(self.MAPPING, 12, 1.0, 1, auto_octave=False,
+                             unlock_stage=3, range_correction=False)
+            player.load(self._song(48))  # C3 +12 lands on the mapped C4
+            self.assertEqual([note.note for note in player.audible_notes], [60])
+        finally:
+            player.close()
+
     def test_bass_profile_starts_in_the_left_window(self):
         player = MidiPlayer(lambda *_: None, lambda *_: None, lambda msg: self.fail(msg))
         try:
