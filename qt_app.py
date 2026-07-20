@@ -393,14 +393,16 @@ class PopoutWindow(QWidget):
     def _build(self, body: QVBoxLayout) -> None:
         raise NotImplementedError
 
-    def _form_row(self, layout: QVBoxLayout, label: str, control: QWidget) -> None:
+    def _form_row(self, layout: QVBoxLayout, label: str, control: QWidget) -> QLabel:
         row = QHBoxLayout()
         row.setSpacing(8)
-        row.addWidget(QLabel(label))
+        caption = QLabel(label)
+        row.addWidget(caption)
         row.addStretch()
         control.setMinimumWidth(215)
         row.addWidget(control)
         layout.addLayout(row)
+        return caption
 
     def show_front(self) -> None:
         self.show()
@@ -553,7 +555,7 @@ class OptionsWindow(PopoutWindow):
 
 
 class InstrumentWindow(PopoutWindow):
-    heading = "INSTRUMENT"
+    heading = "RANGE CORRECTION"
 
     def __init__(self, owner: "ResonanceMidiWindow"):
         super().__init__(owner, 650, 244)
@@ -564,9 +566,17 @@ class InstrumentWindow(PopoutWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
-        heading = QLabel("楽器設定")
+        heading = QLabel("音域補正（ベータ）")
         heading.setObjectName("sectionTitle")
         layout.addWidget(heading)
+
+        self.correction = QCheckBox("音域外の音をオクターブ単位で音域内へ補正する")
+        self.correction.setChecked(self.owner.range_correction)
+        self.correction.toggled.connect(self._correction_toggled)
+        layout.addWidget(self.correction)
+        hint = QLabel("補正はフレーズ単位でまとめて移動します。オフなら音域外は従来どおり鳴りません。")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         self.instrument = QComboBox()
         for index, profile in enumerate(INSTRUMENTS):
@@ -581,25 +591,15 @@ class InstrumentWindow(PopoutWindow):
             max(0, self.instrument.findData(self.owner.instrument))
         )
         self.instrument.currentIndexChanged.connect(self._instrument_changed)
-        self._form_row(layout, "楽器", self.instrument)
+        self.instrument_caption = self._form_row(layout, "楽器", self.instrument)
 
         self.stage = QComboBox()
         self.stage.currentIndexChanged.connect(self._stage_changed)
-        self._form_row(layout, "音域の解放段階", self.stage)
+        self.stage_caption = self._form_row(layout, "音域の解放段階", self.stage)
 
         self.range_label = QLabel("")
         self.range_label.setObjectName("strongLabel")
-        self._form_row(layout, "発音できる音域", self.range_label)
-
-        self.correction = QCheckBox("音域外の音をオクターブ単位で音域内へ補正する")
-        self.correction.setChecked(self.owner.range_correction)
-        self.correction.toggled.connect(
-            lambda value: self.owner.update_setting("range_correction", value)
-        )
-        layout.addWidget(self.correction)
-        hint = QLabel("補正はフレーズ単位でまとめて移動します。オフなら音域外は従来どおり鳴りません。")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        self.range_caption = self._form_row(layout, "発音できる音域", self.range_label)
         layout.addStretch()
 
         export_row = QHBoxLayout()
@@ -613,6 +613,19 @@ class InstrumentWindow(PopoutWindow):
         layout.addLayout(export_row)
         self._reload_stages()
 
+    def _correction_toggled(self, value: bool) -> None:
+        self.owner.update_setting("range_correction", value)
+        self._apply_enabled()
+
+    def _apply_enabled(self) -> None:
+        """Grey out the range settings while the correction is switched off."""
+        on = self.correction.isChecked()
+        profile = instrument_profile(self.owner.instrument)
+        for widget in (self.instrument, self.instrument_caption,
+                       self.stage_caption, self.range_caption, self.range_label):
+            widget.setEnabled(on)
+        self.stage.setEnabled(on and len(profile.stages) > 1)
+
     def _reload_stages(self) -> None:
         profile = instrument_profile(self.owner.instrument)
         self.stage.blockSignals(True)
@@ -620,8 +633,8 @@ class InstrumentWindow(PopoutWindow):
         for step in profile.stages:
             self.stage.addItem(step.label)
         self.stage.setCurrentIndex(profile.clamp_stage(self.owner.unlock_stage))
-        self.stage.setEnabled(len(profile.stages) > 1)
         self.stage.blockSignals(False)
+        self._apply_enabled()
         self._refresh_range_label()
 
     def _refresh_range_label(self) -> None:
@@ -738,7 +751,7 @@ class ResonanceMidiWindow(QWidget):
         title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         header_layout.addWidget(title)
         header_layout.addStretch()
-        self.instrument_button = self.icon_button(keyboard_icon(18), "楽器設定", 32)
+        self.instrument_button = self.icon_button(keyboard_icon(18), "音域補正（ベータ）", 32)
         self.instrument_button.clicked.connect(self.open_instruments)
         self.gear_button = self.icon_button(gear_icon(18), "オプション", 32)
         self.gear_button.clicked.connect(self.open_options)
@@ -842,6 +855,8 @@ class ResonanceMidiWindow(QWidget):
             QFrame#header {{ background: transparent; border: none; }}
             QFrame#panel {{ background: transparent; border: {px(1)}px solid rgba(189, 247, 255, 65); }}
             QLabel {{ color: {WHITE}; background: transparent; border: none; }}
+            QLabel:disabled {{ color: rgba(255, 255, 255, 90); }}
+            QComboBox:disabled {{ background-color: #14171b; color: rgba(255, 255, 255, 90); border-color: #23272d; }}
             QLabel#windowTitle {{ font-weight: 700; color: {WHITE}; }}
             QLabel#songTitle {{ font-size: {px(13)}px; font-weight: 700; color: {WHITE}; }}
             QLabel#metaLabel {{ color: {WHITE}; }}
