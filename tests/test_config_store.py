@@ -51,7 +51,7 @@ class ConfigStoreTests(unittest.TestCase):
             finally:
                 config_store.CONFIG_PATH = old_path
         self.assertEqual(loaded["mapping"], config_store.DEFAULT_CONFIG["mapping"])
-        self.assertEqual(loaded["config_version"], 11)
+        self.assertEqual(loaded["config_version"], 12)
 
     def test_untouched_two_octave_mapping_is_expanded(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -68,7 +68,7 @@ class ConfigStoreTests(unittest.TestCase):
             finally:
                 config_store.CONFIG_PATH = old_path
         self.assertEqual(loaded["mapping"], config_store.DEFAULT_CONFIG["mapping"])
-        self.assertEqual(loaded["config_version"], 11)
+        self.assertEqual(loaded["config_version"], 12)
 
     def test_v6_default_opacity_is_migrated_to_eighty_percent(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -80,7 +80,7 @@ class ConfigStoreTests(unittest.TestCase):
                 loaded = config_store.load_config()
             finally:
                 config_store.CONFIG_PATH = old_path
-        self.assertEqual(loaded["config_version"], 11)
+        self.assertEqual(loaded["config_version"], 12)
         self.assertEqual(loaded["opacity"], 0.8)
 
     def test_incorrect_v9_black_keys_are_migrated(self):
@@ -98,7 +98,7 @@ class ConfigStoreTests(unittest.TestCase):
             finally:
                 config_store.CONFIG_PATH = old_path
         self.assertEqual(loaded["mapping"], config_store.DEFAULT_CONFIG["mapping"])
-        self.assertEqual(loaded["config_version"], 11)
+        self.assertEqual(loaded["config_version"], 12)
 
     def test_game_octave_changes_effective_pitch(self):
         mapping = {48: "Z", 60: "A"}

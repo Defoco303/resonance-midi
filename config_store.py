@@ -42,7 +42,7 @@ def default_mapping(base_note: int = 48) -> dict[int, str]:
 
 
 DEFAULT_CONFIG = {
-    "config_version": 11,
+    "config_version": 12,
     "mapping": {str(note): key for note, key in default_mapping().items()},
     "speed": 1.0,
     "transpose": 0,
@@ -66,6 +66,12 @@ DEFAULT_CONFIG = {
     "opacity": 0.5,
     "window_x": None,
     "window_y": None,
+    # Playlist: an ordered list of file paths plus its own play modes. The gap
+    # is the between-song countdown in seconds (separate from the initial one).
+    "playlist": [],
+    "playlist_shuffle": False,
+    "playlist_repeat": "off",  # "off" | "all" | "one"
+    "playlist_gap": 3,
 }
 
 
@@ -92,8 +98,8 @@ def load_config() -> dict:
                 loaded["target_title"] = DEFAULT_CONFIG["target_title"]
             if int(loaded.get("config_version", 1)) < 7 and loaded.get("opacity", 1.0) == 1.0:
                 loaded["opacity"] = 0.8
-            # v11 only adds keys, which the DEFAULT_CONFIG merge below supplies.
-            loaded["config_version"] = 11
+            # v11/v12 only add keys, which the DEFAULT_CONFIG merge below supplies.
+            loaded["config_version"] = 12
             result.update(loaded)
         if not isinstance(result.get("mapping"), dict):
             result["mapping"] = dict(DEFAULT_CONFIG["mapping"])

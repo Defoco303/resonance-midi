@@ -171,6 +171,38 @@ def focus_window(hwnd: int) -> bool:
     return bool(user32.SetForegroundWindow(hwnd))
 
 
+def foreground_window() -> int:
+    """The window that currently has keyboard focus (0 if none)."""
+    return int(user32.GetForegroundWindow())
+
+
+# WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA. The last (undocumented) is what
+# OLE drag-and-drop uses to hand the data across the integrity boundary.
+_DROP_MESSAGES = (0x0233, 0x004A, 0x0049)
+
+
+def allow_drag_drop() -> None:
+    """Permit drops from a non-elevated Explorer onto our elevated windows.
+
+    When the app runs as administrator, Windows UIPI blocks drag-and-drop from
+    the lower-integrity Explorer (the cursor shows the no-entry icon). The
+    process-wide ChangeWindowMessageFilter lets the OLE drop messages through
+    for every window in this process, so it does not matter which HWND Qt
+    registered the drop target on.
+    """
+    change_filter = getattr(user32, "ChangeWindowMessageFilter", None)
+    if change_filter is None:
+        return
+    change_filter.argtypes = (wintypes.UINT, wintypes.DWORD)
+    change_filter.restype = wintypes.BOOL
+    MSGFLT_ADD = 1
+    for message in _DROP_MESSAGES:
+        try:
+            change_filter(message, MSGFLT_ADD)
+        except OSError:
+            pass
+
+
 def window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
     """Return the visible window rectangle in virtual-screen coordinates."""
     if not hwnd or not user32.IsWindow(hwnd):

@@ -265,30 +265,34 @@ class PlayerTests(unittest.TestCase):
         finally:
             player.close()
 
-    def test_auto_octave_pulses_low_then_high_and_returns(self):
+    def test_pulse_holds_both_notes_through_the_bank_visit(self):
         sent = []
         song = MidiSong(
-            Path("four-octaves.mid"), "four octaves", 0.08,
+            Path("four-octaves.mid"), "four octaves", 0.10,
             (
-                MidiNote(0.01, 0.06, 48, 100, 0, 0),  # C3 = Z normally
-                MidiNote(0.01, 0.06, 84, 100, 0, 0),  # C6 = Z after >
+                MidiNote(0.01, 0.06, 48, 100, 0, 0),  # C3 = Z in the middle window
+                MidiNote(0.01, 0.06, 86, 100, 0, 0),  # D6 = X after > (no key clash)
             ),
             ("track",), 120,
         )
-        mapping = {48: "Z"}
+        mapping = {48: "Z", 50: "X"}
         player = MidiPlayer(lambda key, down: sent.append((key, down)),
                             lambda *_: None, lambda msg: self.fail(msg))
         try:
             player.configure(mapping, 0, 1.0, 30, auto_octave=True, octave_switch_ms=0)
             player.load(song)
+            self.assertEqual(player.octave_plan_stats["pulse_batches"], 1)
             player.play()
-            time.sleep(0.14)
-            self.assertEqual(sent, [
-                ("Z", True), ("Z", False),
-                (".", True), (".", False),
-                ("Z", True), ("Z", False),
-                (",", True), (",", False),
-            ])
+            time.sleep(0.16)
+            # Both notes are struck; neither key collides with the other.
+            self.assertIn(("Z", True), sent)
+            self.assertIn(("X", True), sent)
+            # C3 (Z) is held THROUGH the pulse: the > and < happen before Z is
+            # released, and its release comes at the note-off, not at the switch.
+            z_up = sent.index(("Z", False))
+            self.assertIn((".", True), sent[:z_up])
+            self.assertIn((",", True), sent[:z_up])
+            self.assertFalse(player.keyboard_shifted)
         finally:
             player.close()
 
@@ -491,6 +495,195 @@ class InstrumentRangeTests(unittest.TestCase):
             player.configure(self.MAPPING, 0, 1.0, 1, instrument="bass")
             self.assertEqual(player._initial_state, (-3, 0))
             self.assertFalse(player.keyboard_shifted)
+        finally:
+            player.close()
+
+
+class DrumPlaybackTests(unittest.TestCase):
+    # The full C3-B5 layout so the nine drum keys resolve to real letters.
+    from config_store import default_mapping as _dm
+    MAPPING = _dm()
+
+    def _drum_song(self, *events):
+        # events: (start, gm_note) tuples on the percussion channel (9).
+        notes = tuple(
+            MidiNote(start, start + 0.01, gm, 100, 9, 0)
+            for start, gm in events
+        )
+        end = max(start for start, _ in events) + 0.1
+        return MidiSong(Path("drum.mid"), "drum", end, notes, ("track",), 120)
+
+    def _player(self, sent, **kw):
+        player = MidiPlayer(lambda key, down: sent.append((key, down)),
+                            lambda *_: None, lambda msg: self.fail(msg))
+        player.configure(self.MAPPING, kw.pop("transpose", 0), 1.0, 1,
+                         instrument="drums", **kw)
+        return player
+
+    def test_gm_percussion_plays_the_nine_fixed_drum_keys(self):
+        sent = []
+        player = self._player(sent, auto_octave=True, octave_switch_ms=0)
+        try:
+            player.load(self._drum_song(
+                (0.02, 36),  # bass drum -> F
+                (0.05, 38),  # snare -> Q
+                (0.08, 42),  # closed hi-hat -> S
+                (0.11, 46),  # open hi-hat -> T
+                (0.14, 49),  # crash -> R
+                (0.17, 51),  # ride -> Y
+                (0.20, 48),  # hi-mid tom -> E (high tom, user decision)
+                (0.23, 54),  # tambourine -> T (redirected)
+                (0.26, 56),  # cowbell -> Y (redirected)
+            ))
+            # Drums sit entirely in the middle window: no switching at all.
+            self.assertEqual(player.octave_plan_stats["control_taps"], 0)
+            self.assertEqual(player.octave_plan_stats["pulse_batches"], 0)
+            player.play()
+            time.sleep(0.4)
+            pressed = [key for key, down in sent if down]
+            self.assertEqual(pressed, ["F", "Q", "S", "T", "R", "Y", "E", "T", "Y"])
+        finally:
+            player.close()
+
+    def test_unmapped_percussion_is_dropped_and_counted(self):
+        sent = []
+        player = self._player(sent)
+        try:
+            player.load(self._drum_song((0.02, 38), (0.05, 71)))  # snare + short whistle
+            self.assertEqual(player.range_stats["unplayable_notes"], 1)
+            self.assertEqual([n.note for n in player.audible_notes], [72])  # snare only
+        finally:
+            player.close()
+
+    def test_initial_drum_stage_redirects_locked_sounds_with_correction(self):
+        sent = []
+        # Correction on: locked sounds are redirected. Only snare + toms unlocked.
+        player = self._player(sent, unlock_stage=0, range_correction=True)
+        try:
+            # bass(36)->floor tom H(69), crash(49)->snare Q(72), closed hh(42)->high tom E(76)
+            player.load(self._drum_song((0.02, 36), (0.05, 49), (0.08, 42)))
+            self.assertEqual([n.note for n in player.audible_notes], [69, 72, 76])
+        finally:
+            player.close()
+
+    def test_locked_drums_are_dropped_without_correction(self):
+        sent = []
+        # Correction off (default): locked sounds go silent instead of moving.
+        player = self._player(sent, unlock_stage=0)
+        try:
+            # bass + crash locked -> dropped; snare(38) unlocked -> Q(72).
+            player.load(self._drum_song((0.02, 36), (0.05, 49), (0.08, 38)))
+            self.assertEqual([n.note for n in player.audible_notes], [72])
+            self.assertEqual(player.range_stats["unplayable_notes"], 2)
+        finally:
+            player.close()
+
+    def test_melodic_channels_are_ignored_in_drum_mode(self):
+        sent = []
+        player = self._player(sent)
+        try:
+            song = MidiSong(
+                Path("mixed.mid"), "mixed", 0.3,
+                (MidiNote(0.02, 0.03, 60, 100, 0, 0),   # melody, channel 0
+                 MidiNote(0.05, 0.06, 38, 100, 9, 0)),  # snare, channel 9
+                ("track",), 120,
+            )
+            player.load(song)
+            self.assertEqual([n.note for n in player.audible_notes], [72])
+        finally:
+            player.close()
+
+    def test_transpose_does_not_shift_drums(self):
+        sent = []
+        player = self._player(sent, transpose=12)
+        try:
+            player.load(self._drum_song((0.02, 38)))  # snare stays on Q (72)
+            self.assertEqual([n.note for n in player.audible_notes], [72])
+        finally:
+            player.close()
+
+
+class NaturalDecayTests(unittest.TestCase):
+    def test_natural_decay_flags(self):
+        from instruments import instrument_profile
+        # Piano is on trial as natural-decay too (relies on the sustain pedal).
+        self.assertTrue(instrument_profile("keyboard").natural_decay)
+        self.assertTrue(instrument_profile("guitar").natural_decay)
+        self.assertTrue(instrument_profile("bass").natural_decay)
+        self.assertFalse(instrument_profile("drums").natural_decay)
+
+    def _first_note_off(self, instrument: str, press_ms: int) -> float:
+        from config_store import default_mapping
+        player = MidiPlayer(lambda *_: None, lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(default_mapping(), 0, 1.0, press_ms, instrument=instrument)
+            song = MidiSong(Path("d.mid"), "d", 1.0,
+                            (MidiNote(0.0, 0.5, 64, 100, 0, 0),), ("t",), 120)  # E4, 0.5s
+            player.load(song)
+            return next(e.time for e in player._events if not e.pressed)
+        finally:
+            player.close()
+
+    def test_natural_decay_holds_full_note_despite_short_press_ms(self):
+        # Held for the whole note even with press_ms=1, so the user never tunes
+        # key-hold per instrument; the octave planner frees the key when needed.
+        self.assertAlmostEqual(self._first_note_off("guitar", 1), 0.5, places=3)
+        self.assertAlmostEqual(self._first_note_off("keyboard", 1), 0.5, places=3)
+
+
+class HoldThroughSwitchTests(unittest.TestCase):
+    def test_repeated_note_releases_before_the_next_hit(self):
+        from config_store import default_mapping
+        player = MidiPlayer(lambda *_: None, lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(default_mapping(), 0, 1.0, 0, instrument="keyboard")
+            # Two legato repeats of C4; full-hold would merge them without a gap.
+            song = MidiSong(
+                Path("rep.mid"), "rep", 0.6,
+                (MidiNote(0.0, 0.25, 60, 100, 0, 0), MidiNote(0.25, 0.50, 60, 100, 0, 0)),
+                ("t",), 120,
+            )
+            player.load(song)
+            offs = sorted(e.time for e in player._events if not e.pressed)
+            # First note is released before the repeat, leaving a re-trigger gap.
+            self.assertLessEqual(offs[0], 0.25 - 0.029)
+            # A single (non-repeated) note still holds the full duration.
+            player.load(MidiSong(Path("one.mid"), "one", 0.6,
+                                 (MidiNote(0.0, 0.25, 60, 100, 0, 0),), ("t",), 120))
+            self.assertAlmostEqual(
+                next(e.time for e in player._events if not e.pressed), 0.25, places=3)
+        finally:
+            player.close()
+
+    def test_held_note_survives_an_octave_switch(self):
+        from config_store import default_mapping
+        sent = []
+        started = time.perf_counter()
+
+        def send(key, down):
+            sent.append((time.perf_counter() - started, key, down))
+
+        # C3 (Z) held 0.0-0.30 while D6 at 0.14 forces a window switch (LSHIFT).
+        song = MidiSong(
+            Path("hts.mid"), "hts", 0.5,
+            (MidiNote(0.0, 0.30, 48, 100, 0, 0), MidiNote(0.14, 0.16, 86, 100, 0, 0)),
+            ("t",), 120,
+        )
+        player = MidiPlayer(send, lambda *_: None, lambda msg: self.fail(msg))
+        try:
+            player.configure(default_mapping(), 0, 1.0, 0, auto_octave=True,
+                             octave_switch_ms=20, instrument="keyboard")
+            player.load(song)
+            started = time.perf_counter()
+            player.play()
+            time.sleep(0.5)
+            shift_down = next(t for t, k, d in sent if k == "LSHIFT" and d)
+            z_up = next(t for t, k, d in sent if k == "Z" and not d)
+            w_down = next(t for t, k, d in sent if k == "W" and d)
+            # C3's key is not released at the switch; it rings until its own end.
+            self.assertGreater(z_up, shift_down + 0.10)
+            # The switched-to note still lands on time.
+            self.assertLess(abs(w_down - 0.14), 0.04)
         finally:
             player.close()
 

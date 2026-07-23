@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 import ctypes
 import heapq
 import threading
@@ -12,6 +12,7 @@ from instruments import (
     DEFAULT_INSTRUMENT,
     DEFAULT_UNLOCK_STAGE,
     InstrumentProfile,
+    drum_note_for_gm,
     instrument_profile,
 )
 from midi_parser import MidiNote, MidiSong
@@ -116,6 +117,7 @@ class MidiPlayer:
         self._profile: InstrumentProfile = instrument_profile(DEFAULT_INSTRUMENT)
         self._unlock_stage = DEFAULT_UNLOCK_STAGE
         self._range_correction = False
+        self._natural_decay = self._profile.natural_decay
         self._initial_state: KeyboardState = self._profile.initial_state
         self._supported_first_note = 21
         self._supported_last_note = 108
@@ -131,7 +133,11 @@ class MidiPlayer:
         self._octave_switch_delay = 0.018
         self._press_ms = 80
         self._ignore_drums = True
-        self._active: dict[str, int] = {}
+        # Identity-based key tracking: one physical key sounds one pitch at a
+        # time. These let a held note survive an octave switch and be released
+        # on the exact key it was struck on (see _dispatch_locked).
+        self._key_pitch: dict[str, int] = {}   # physical key -> pitch sounding
+        self._pitch_key: dict[int, str] = {}   # pitch -> key it sounds on
         self._active_since: dict[str, float] = {}
         self._high_resolution_timer = False
         try:
@@ -211,6 +217,7 @@ class MidiPlayer:
             self._profile = profile
             self._unlock_stage = stage
             self._range_correction = bool(range_correction)
+            self._natural_decay = profile.natural_decay
             if profile.initial_state != self._initial_state:
                 # Picking up a different instrument in game reopens its own
                 # starting window, so the tracked position restarts there too.
@@ -224,6 +231,12 @@ class MidiPlayer:
             self._supported_first_note, self._supported_last_note = (
                 profile.sounding_range(first_note, stage)
             )
+            if profile.key == "drums":
+                # Drums are voiced by a discrete lookup, not the contiguous
+                # sounding_range (whose drum stages are unconfirmed). Cover the
+                # nine fixed keys so this unlocked build never filters them out.
+                self._supported_first_note = first_note + 14  # closed hi-hat
+                self._supported_last_note = first_note + 33   # ride
             self._state_mappings = {
                 state: {
                     note + (state[0] + state[1]) * 12: key
@@ -240,7 +253,9 @@ class MidiPlayer:
             self._high_mapping = dict(self._state_mappings.get((3, 0), {}))
             self._auto_octave = bool(auto_octave)
             self._octave_switch_delay = max(0, min(int(octave_switch_ms), 100)) / 1000
-            self._transpose = int(transpose)
+            # Transpose is a pitch shift and drums are not pitched, so it is
+            # forced off for the drum kit (see _build_drum_events_locked).
+            self._transpose = 0 if profile.key == "drums" else int(transpose)
             self._speed = max(0.1, min(float(speed), 4.0))
             self._press_ms = max(0, int(press_ms))
             self._ignore_drums = bool(ignore_drums)
@@ -260,11 +275,46 @@ class MidiPlayer:
             return any(pitch in mapping for mapping in self._state_mappings.values())
         return pitch in self._mapping
 
+    def _build_drum_events_locked(self, events: list[TimedEvent],
+                                  audible: list[MidiNote]) -> None:
+        """Turn channel-10 percussion into the game's nine fixed drum keys.
+
+        Drums are a lookup, not a transposition: each GM percussion number is
+        remapped onto one of nine notes of the normal C3-B5 window, so the
+        existing note->key mapping plays it with no octave switching at all.
+        Melodic channels are dropped because the drum kit cannot voice them.
+        """
+        first = self._normal_first_note
+        stage = self._unlock_stage
+        for note in self._song.notes:
+            if note.channel != 9:
+                continue
+            # Correction on: redirect not-yet-unlocked sounds to an unlocked one.
+            # Correction off: a locked sound is dropped (silent), like a melodic
+            # out-of-range note.
+            target = drum_note_for_gm(note.note, first, stage, self._range_correction)
+            if target is None:
+                # No key, or a locked sound with correction off: silently dropped.
+                self._range_stats["unplayable_notes"] += 1
+                continue
+            if self._range_correction and drum_note_for_gm(note.note, first, stage, False) is None:
+                # It only sounds because correction redirected a locked sound.
+                self._range_stats["folded_notes"] += 1
+            audible.append(MidiNote(note.start, note.end, target,
+                                    note.velocity, note.channel, note.track))
+            # Drums are one-shots: a fixed short strike (never a held key) so a
+            # repeated hit on the same key always re-triggers. Key-hold has no
+            # musical meaning for percussion, so press_ms is ignored here.
+            events.append(TimedEvent(note.start, True, target))
+            events.append(TimedEvent(note.start + 0.008, False, target))
+
     def _build_events_locked(self) -> None:
         events: list[TimedEvent] = []
         audible: list[MidiNote] = []
         self._range_stats = {"folded_notes": 0, "unplayable_notes": 0}
-        if self._song:
+        if self._song and self._profile.key == "drums":
+            self._build_drum_events_locked(events, audible)
+        elif self._song:
             notes = [
                 note for note in self._song.notes
                 if not (self._ignore_drums and note.channel == 9)
@@ -275,6 +325,15 @@ class MidiPlayer:
                                     self._supported_last_note)
             else:
                 shifts = [0] * len(notes)
+            # Attack times per sounding pitch (= per physical key in a window), so
+            # a held note can be released just before the next hit of the same
+            # note. Otherwise a legato repeat's release lands in the same game
+            # frame as the re-press and the two notes merge into one long note.
+            attacks_by_pitch: dict[int, list[float]] = {}
+            for note, shift in zip(notes, shifts):
+                attacks_by_pitch.setdefault(note.note + shift, []).append(note.start)
+            for starts in attacks_by_pitch.values():
+                starts.sort()
             for note, shift in zip(notes, shifts):
                 pitch = note.note + shift
                 if not (self._supported_first_note
@@ -291,7 +350,20 @@ class MidiPlayer:
                     audible.append(MidiNote(note.start, note.end,
                                             pitch + self._transpose, note.velocity,
                                             note.channel, note.track))
-                end = note.end if self._press_ms == 0 else min(note.end, note.start + self._press_ms / 1000)
+                # Strings hold for the whole notated note (like press_ms 0) so
+                # the user never has to tune key-hold per instrument; the octave
+                # planner is free to release them early to reposition because the
+                # sound rings on regardless.
+                if self._press_ms == 0 or self._natural_decay:
+                    end = note.end
+                else:
+                    end = min(note.end, note.start + self._press_ms / 1000)
+                # Leave a gap before the next hit of the same note so the game
+                # sees the release and re-triggers instead of merging them.
+                starts = attacks_by_pitch[pitch]
+                index = bisect_right(starts, note.start)
+                if index < len(starts):
+                    end = min(end, starts[index] - 0.03)
                 end = max(end, note.start + 0.008)
                 events.append(TimedEvent(note.start, True, pitch))
                 events.append(TimedEvent(end, False, pitch))
@@ -499,38 +571,52 @@ class MidiPlayer:
             self._high_resolution_timer = False
 
     def _release_all_locked(self) -> None:
-        for key in list(self._active):
+        for key in list(self._key_pitch):
             try:
                 self._send(key, False)
             except Exception:
                 pass
-        self._active.clear()
+        self._key_pitch.clear()
+        self._pitch_key.clear()
         self._active_since.clear()
 
     def _dispatch_locked(self, event: TimedEvent, mapping: dict[int, str] | None = None) -> None:
-        key = (mapping or self._mapping).get(event.note + self._transpose)
-        if not key:
-            return
+        pitch = event.note + self._transpose
         try:
-            count = self._active.get(key, 0)
             if event.pressed:
-                if count == 0:
-                    self._send(key, True)
-                    self._active_since[key] = time.perf_counter()
-                self._active[key] = count + 1
-            elif count > 0:
-                if count == 1:
-                    # A range change can consume part of the MIDI note's
-                    # scheduled duration. Guarantee a real, observable key
-                    # hold instead of releasing an overdue note immediately.
-                    elapsed = time.perf_counter() - self._active_since.get(key, 0.0)
-                    if elapsed < 0.008:
-                        time.sleep(0.008 - elapsed)
+                key = (mapping or self._mapping).get(pitch)
+                if not key:
+                    return
+                # A physical key sounds one pitch. Free the key of whatever it is
+                # holding, and free this pitch from any other key, then strike.
+                occupant = self._key_pitch.get(key)
+                if occupant is not None:
                     self._send(key, False)
-                    self._active.pop(key, None)
-                    self._active_since.pop(key, None)
-                else:
-                    self._active[key] = count - 1
+                    self._pitch_key.pop(occupant, None)
+                previous = self._pitch_key.get(pitch)
+                if previous is not None and previous != key:
+                    self._send(previous, False)
+                    self._key_pitch.pop(previous, None)
+                    self._active_since.pop(previous, None)
+                self._send(key, True)
+                self._key_pitch[key] = pitch
+                self._pitch_key[pitch] = key
+                self._active_since[key] = time.perf_counter()
+            else:
+                # Release the key the note was actually struck on, which can
+                # differ from the current window's mapping after a switch.
+                key = self._pitch_key.get(pitch)
+                if key is None:
+                    return
+                # Guarantee a real, observable hold instead of releasing an
+                # overdue note (whose time a range change consumed) immediately.
+                elapsed = time.perf_counter() - self._active_since.get(key, 0.0)
+                if elapsed < 0.008:
+                    time.sleep(0.008 - elapsed)
+                self._send(key, False)
+                self._key_pitch.pop(key, None)
+                self._pitch_key.pop(pitch, None)
+                self._active_since.pop(key, None)
         except Exception as exc:
             self._state = "paused"
             self._release_all_locked()
@@ -546,7 +632,11 @@ class MidiPlayer:
     def _set_keyboard_state_locked(self, target: KeyboardState) -> None:
         if self._keyboard_state == target:
             return
-        self._release_all_locked()
+        # Hold-through-switch: held notes are NOT released here. The game keeps a
+        # held key sounding while the window moves (verified on the real game),
+        # so the note rings on across the switch even with sustain off. Identity
+        # tracking (_pitch_key) still releases each note on its original key, and
+        # a new note that needs a currently-held key frees it in _dispatch_locked.
         for control in KEYBOARD_PATHS[(self._keyboard_state, target)]:
             # Modifier toggles are frame-polled by the game. A longer press is
             # safe when issued during the rest before the target note.
@@ -562,8 +652,16 @@ class MidiPlayer:
             self._set_keyboard_state_locked(self._initial_state)
 
     def _prepare_next_keyboard_state_locked(self) -> None:
-        """Use the rest before the next attack to finish its range change."""
-        if not self._auto_octave or self._active:
+        """Use the rest before the next attack to finish its range change.
+
+        Normally a held key blocks this (moving the keyboard releases every held
+        key, which would cut a piano note). A natural-decay instrument keeps
+        ringing after release, so it may reposition mid-note: the held keys are
+        freed and the sound sustains on its own.
+        """
+        if not self._auto_octave:
+            return
+        if self._key_pitch and not self._natural_decay:
             return
         index = self._index
         while index < len(self._events):
@@ -595,11 +693,11 @@ class MidiPlayer:
             return
 
     def _dispatch_batch_locked(self, events: list[TimedEvent]) -> None:
-        """Dispatch one timestamp, pulsing C6-B6 through the > keyboard bank.
+        """Dispatch one timestamp, visiting the outer banks for a pulse.
 
-        Notes in the normal bank are attacked first. They are released before
-        the bank changes, but the game's piano decay lets their sound overlap
-        the high-bank attack like a very fast arpeggio.
+        A pulse batch spans more than one 3-octave window. Each note is struck in
+        its bank and left held (hold-through): it keeps ringing across the return
+        move and is released on its own key at its note-off (identity tracking).
         """
         if not self._auto_octave:
             for event in events:
@@ -615,8 +713,6 @@ class MidiPlayer:
                 self._dispatch_locked(event, mapping)
             return
 
-        self._set_keyboard_state_locked(self._initial_state)
-
         low_attacks = [
             event for event in events
             if event.pressed and event.note + self._transpose in self._low_mapping
@@ -625,17 +721,21 @@ class MidiPlayer:
             event for event in events
             if event.pressed and event.note + self._transpose in self._high_mapping
         ]
+        # Releases first: identity tracking frees each note on its original key,
+        # so the current window does not matter here.
+        for event in events:
+            if not event.pressed:
+                self._dispatch_locked(event)
+        # Middle-bank note-ons play in the initial window and stay held.
+        self._set_keyboard_state_locked(self._initial_state)
         for event in events:
             pitch = event.note + self._transpose
-            if pitch not in self._low_mapping and pitch not in self._high_mapping:
+            if (event.pressed and pitch not in self._low_mapping
+                    and pitch not in self._high_mapping):
                 self._dispatch_locked(event)
         if not low_attacks and not high_attacks:
             return
 
-        # Never carry a physical key hold across a keyboard-bank change; its
-        # later key-up could otherwise release a different displayed note.
-        self._release_all_locked()
-        pressed: list[str] = []
         try:
             for attacks, mapping, target in (
                 (low_attacks, self._low_mapping, (-3, 0)),
@@ -643,25 +743,16 @@ class MidiPlayer:
             ):
                 if not attacks:
                     continue
-                keys = list(dict.fromkeys(
-                    mapping[event.note + self._transpose] for event in attacks
-                ))
                 self._set_keyboard_state_locked(target)
-                for key in keys:
-                    self._send(key, True)
-                    pressed.append(key)
+                for event in attacks:
+                    self._dispatch_locked(event, mapping)
+                # Let the strike register before moving the window away; the held
+                # key keeps sounding through the return move.
                 time.sleep(max(0.008, min(0.020, self._octave_switch_delay)))
-                for key in reversed(pressed):
-                    self._send(key, False)
-                pressed.clear()
                 self._set_keyboard_state_locked(self._initial_state)
         except Exception as exc:
-            for key in reversed(pressed):
-                try:
-                    self._send(key, False)
-                except Exception:
-                    pass
             self._state = "paused"
+            self._release_all_locked()
             self._restore_normal_keyboard_locked()
             self._on_error(f"4オクターブ自動切替に失敗しました: {exc}")
 
