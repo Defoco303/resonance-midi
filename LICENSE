@@ -1,0 +1,71 @@
+Resonance MIDI Player
+Copyright (C) 2026 Defoco303. All Rights Reserved.
+
+------------------------------------------------------------------------
+日本語
+------------------------------------------------------------------------
+
+本ソフトウェアおよびそのソースコード（以下「本ソフトウェア」）に関する
+著作権その他の一切の権利は、Defoco303（以下「著作者」）に帰属します。
+
+著作者の書面による事前の許可なく、以下の行為を行うことを禁止します。
+
+1. 本ソフトウェアまたはその一部を、複製・転載・再配布・公開・アップロード
+   すること。
+2. 本ソフトウェアを改変・翻案し、または二次的著作物を作成し、それらを
+   配布すること。
+3. 本ソフトウェアを逆コンパイル・逆アセンブル・リバースエンジニアリングし、
+   ソースコードやアルゴリズムを復元・解析すること（適用される法律により
+   これを禁止できない範囲を除く）。
+4. 本ソフトウェアのソースコード、アルゴリズムの実装、定数・ヒューリスティック、
+   またはそれらの一部を、他のソフトウェアへ転用・組み込むこと。
+5. 商用・非商用を問わず、本ソフトウェアを用いて再頒布・再販売・提供する
+   こと。
+
+利用者は、配布された実行ファイルを、自身の環境で個人的に使用する目的に
+限り使用できます。
+
+本ソフトウェアには、第三者が権利を有するオープンソースソフトウェア
+（PySide6 等）が含まれます。これらの構成要素は、それぞれのライセンスに
+従い、上記の制限は当該構成要素自体には及びません。
+
+本ソフトウェアは「現状有姿（AS IS）」で提供されます。著作者は、明示・黙示を
+問わず、商品性・特定目的適合性を含むいかなる保証も行いません。本ソフトウェア
+の使用または使用不能から生じるいかなる損害についても、著作者は責任を
+負いません。
+
+------------------------------------------------------------------------
+English
+------------------------------------------------------------------------
+
+This software and its source code (the "Software") and all rights therein
+are owned by Defoco303 (the "Author").
+
+Without the Author's prior written permission, you may NOT:
+
+1. Copy, repost, redistribute, publish, or upload the Software or any part
+   of it.
+2. Modify or adapt the Software, or create derivative works, or distribute
+   any such works.
+3. Decompile, disassemble, or reverse engineer the Software to recover or
+   analyze its source code or algorithms (except to the extent this
+   prohibition cannot be excluded under applicable law).
+4. Reuse or incorporate the Software's source code, algorithm
+   implementations, constants/heuristics, or any part thereof into other
+   software.
+5. Redistribute, resell, or otherwise provide the Software, whether
+   commercially or non-commercially.
+
+You may use the distributed executable of the Software for personal use on
+your own system only.
+
+The Software includes third-party open-source components (such as PySide6)
+owned by their respective authors. Those components are governed by their
+own licenses, and the restrictions above do not apply to the components
+themselves.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY AND
+FITNESS FOR A PARTICULAR PURPOSE. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
